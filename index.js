@@ -33,61 +33,56 @@ app.post("/webhook", async (req, res) => {
 
       console.log("User:", userText);
 
-      // 🧠 OpenAI call
       const aiResponse = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "gpt-5.3",
-          input: `You are a friendly clinic booking assistant.
-Reply briefly, warmly, and guide toward booking.
-Always end with one simple question.
+  method: "POST",
+  headers: {
+    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    model: "gpt-5.3",
+    input: [
+      {
+        role: "system",
+        content: `You are the Messenger booking assistant for SmileCare Dental Manila.
 
-User: ${userText}`
-        })
-      });
+Your goal:
+Convert chats into booked appointments quickly.
 
-      const aiData = await aiResponse.json();
-      const reply = aiData.output[0].content[0].text;
+STYLE:
+- 1–2 sentences max
+- Fast, confident, premium
+- Natural human tone
+- Slightly upbeat
+- Max 1 emoji (not always)
 
-      console.log("AI:", reply);
+RULES:
+- Always move toward booking OR next step
+- End with ONE simple question (unless holding for human)
+- Do NOT give medical advice
+- Do NOT overexplain
+- Answer first, then guide
 
-      await sendMessage(senderId, reply);
-    }
+BOOKING BEHAVIOR:
+- Offer time slots early
+- Suggest today/tomorrow when relevant
+- Keep momentum
 
-    res.sendStatus(200);
+LOCAL ADAPTATION:
+- If user uses Tagalog/Cebuano → include 1 local word (Sige, Oo, etc)
 
-  } catch (error) {
-    console.error("Error:", error);
-    res.sendStatus(500);
-  }
+HANDOVER:
+If user is ready to book:
+→ respond like:
+“Got it 😊 let me check that for you—one sec”
+→ do NOT ask a question
+
+Keep replies short, natural, and human.`
+      },
+      {
+        role: "user",
+        content: userText
+      }
+    ]
+  })
 });
-  } catch (error) {
-    console.error("Reply error:", error);
-  }
-
-  res.sendStatus(200);
-});
-
-async function sendMessage(senderId, text) {
-  const response = await fetch(
-    `https://graph.facebook.com/v25.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recipient: { id: senderId },
-        message: { text }
-      })
-    }
-  );
-
-  const data = await response.json();
-  console.log("Send response:", data);
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
