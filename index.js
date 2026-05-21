@@ -48,7 +48,7 @@ async function getAIReply(userText) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-5.3",
+      model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
@@ -93,7 +93,7 @@ If user uses Tagalog or Cebuano, include one natural local word like “Sige”,
 
   return (
     data.output?.[0]?.content?.[0]?.text ||
-    "Hi 😊 how can I help you today?"
+    "Hi 😊 good to hear from you."
   );
 }
 
