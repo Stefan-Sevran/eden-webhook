@@ -91,10 +91,13 @@ If user uses Tagalog or Cebuano, include one natural local word like “Sige”,
   const data = await response.json();
   console.log("OpenAI response:", JSON.stringify(data, null, 2));
 
-  return (
-    data.output?.[0]?.content?.[0]?.text ||
-    "Hi 😊 good to hear from you."
-  );
+  const reply =
+  data.output_text ||
+  data.output?.[0]?.content?.[0]?.text ||
+  data.output?.[1]?.content?.[0]?.text ||
+  "Hi 😊 how can I help you today?";
+
+return reply;
 }
 
 async function sendMessage(senderId, text) {
