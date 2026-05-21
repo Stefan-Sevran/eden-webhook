@@ -37,6 +37,7 @@ app.post("/webhook", async (req, res) => {
         },
         body: JSON.stringify({
           model: "gpt-5.3",
+          temperature: 0.7,
           input: [
             {
               role: "system",
