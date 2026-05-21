@@ -19,8 +19,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-const fetch = require("node-fetch");
-
 app.post("/webhook", async (req, res) => {
   console.log("Incoming webhook:", JSON.stringify(req.body, null, 2));
 
@@ -31,58 +29,35 @@ app.post("/webhook", async (req, res) => {
       const senderId = messaging.sender.id;
       const userText = messaging.message.text;
 
-      console.log("User:", userText);
-
       const aiResponse = await fetch("https://api.openai.com/v1/responses", {
-  method: "POST",
-  headers: {
-    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    model: "gpt-5.3",
-    input: [
-      {
-        role: "system",
-        content: `You are the Messenger booking assistant for SmileCare Dental Manila.
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-5.3",
+          input: [
+            {
+              role: "system",
+              content: "You are the Messenger booking assistant for SmileCare Dental Manila. Reply warmly, briefly, premium and human. 1–2 sentences max. Answer first, then guide toward booking. End with one simple question unless holding for human takeover. Never diagnose or give medical advice."
+            },
+            {
+              role: "user",
+              content: userText
+            }
+          ]
+        })
+      });
 
-Your goal:
-Convert chats into booked appointments quickly.
+      const aiData = await aiResponse.json();
+      const reply = aiData.output?.[0]?.content?.[0]?.text || "Hi 😊 how can I help you today?";
 
-STYLE:
-- 1–2 sentences max
-- Fast, confident, premium
-- Natural human tone
-- Slightly upbeat
-- Max 1 emoji (not always)
+      await sendMessage(senderId, reply);
+    }
+  } catch (error) {
+    console.error("Error:", error);
+  }
 
-RULES:
-- Always move toward booking OR next step
-- End with ONE simple question (unless holding for human)
-- Do NOT give medical advice
-- Do NOT overexplain
-- Answer first, then guide
-
-BOOKING BEHAVIOR:
-- Offer time slots early
-- Suggest today/tomorrow when relevant
-- Keep momentum
-
-LOCAL ADAPTATION:
-- If user uses Tagalog/Cebuano → include 1 local word (Sige, Oo, etc)
-
-HANDOVER:
-If user is ready to book:
-→ respond like:
-“Got it 😊 let me check that for you—one sec”
-→ do NOT ask a question
-
-Keep replies short, natural, and human.`
-      },
-      {
-        role: "user",
-        content: userText
-      }
-    ]
-  })
+  res.sendStatus(200);
 });
