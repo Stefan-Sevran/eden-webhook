@@ -19,6 +19,8 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+const fetch = require("node-fetch");
+
 app.post("/webhook", async (req, res) => {
   console.log("Incoming webhook:", JSON.stringify(req.body, null, 2));
 
@@ -27,9 +29,42 @@ app.post("/webhook", async (req, res) => {
 
     if (messaging?.sender?.id && messaging?.message?.text) {
       const senderId = messaging.sender.id;
+      const userText = messaging.message.text;
 
-      await sendMessage(senderId, "Got your message 😄 Eden is now live.");
+      console.log("User:", userText);
+
+      // 🧠 OpenAI call
+      const aiResponse = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-5.3",
+          input: `You are a friendly clinic booking assistant.
+Reply briefly, warmly, and guide toward booking.
+Always end with one simple question.
+
+User: ${userText}`
+        })
+      });
+
+      const aiData = await aiResponse.json();
+      const reply = aiData.output[0].content[0].text;
+
+      console.log("AI:", reply);
+
+      await sendMessage(senderId, reply);
     }
+
+    res.sendStatus(200);
+
+  } catch (error) {
+    console.error("Error:", error);
+    res.sendStatus(500);
+  }
+});
   } catch (error) {
     console.error("Reply error:", error);
   }
