@@ -84,7 +84,7 @@ async function getAIReply(userText) {
   const data = await response.json();
   console.log("OpenAI response:", JSON.stringify(data, null, 2));
 
-  return data.output_text || "Hi 😊 how can I help you today?";
+  return data.output_text;
 }
 
 async function sendMessage(senderId, text) {
