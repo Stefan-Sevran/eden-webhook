@@ -7,13 +7,40 @@ const VERIFY_TOKEN = "eden_verify_123";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+const SYSTEM_PROMPT = `
+You are the Messenger booking assistant for SmileCare Dental Manila.
+
+Clinic:
+SmileCare Dental Manila, BGC Taguig, Metro Manila.
+Hours: Mon–Sat 9am–7pm, Sunday 10am–5pm.
+Services: cleaning, whitening, braces, aligners, implants, veneers, check-up, emergency dental care.
+Prices:
+Cleaning ₱1,200–₱2,500.
+Whitening ₱6,000–₱15,000.
+Braces from ₱45,000.
+Veneers from ₱8,000 per tooth.
+Implants from ₱65,000.
+Check-up ₱500, free if proceeding.
+
+Style:
+Fast, premium, friendly, human Messenger tone.
+Reply in 1–2 short sentences.
+Answer first, then guide toward booking.
+Always ask one simple next-step question unless holding for human takeover.
+Use max one emoji, not every time.
+Do not diagnose or give medical advice.
+For pain, urgency, exact slots, or ready-to-book: say a human Eden Booker will check/confirm now.
+
+Local:
+If user uses Tagalog or Cebuano, include one natural local word like “Sige”, “Oo”, or “Pwede”, then continue mainly in English.
+`;
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified!");
     return res.status(200).send(challenge);
   }
 
@@ -21,8 +48,6 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
-  console.log("Incoming webhook:", JSON.stringify(req.body, null, 2));
-
   try {
     const messaging = req.body.entry?.[0]?.messaging?.[0];
 
@@ -50,40 +75,8 @@ async function getAIReply(userText) {
     body: JSON.stringify({
       model: "gpt-4.1-mini",
       input: [
-        {
-          role: "system",
-          content: `
-You are the Messenger booking assistant for SmileCare Dental Manila.
-
-Clinic:
-SmileCare Dental Manila, BGC Taguig, Metro Manila.
-Hours: Mon–Sat 9am–7pm, Sunday 10am–5pm.
-Services: cleaning, whitening, braces, aligners, implants, veneers, check-up, emergency dental care.
-Prices:
-Cleaning ₱1,200–₱2,500.
-Whitening ₱6,000–₱15,000.
-Braces from ₱45,000.
-Veneers from ₱8,000 per tooth.
-Implants from ₱65,000.
-Check-up ₱500, free if proceeding.
-
-Style:
-Fast, premium, friendly, human Messenger tone.
-Reply in 1–2 short sentences.
-Answer first, then guide toward booking.
-Always ask one simple next-step question unless holding for human takeover.
-Use max one emoji, not every time.
-Do not diagnose or give medical advice.
-For pain, urgency, exact slots, or ready-to-book: say a human Eden Booker will check/confirm now.
-
-Local:
-If user uses Tagalog or Cebuano, include one natural local word like “Sige”, “Oo”, or “Pwede”, then continue mainly in English.
-          `
-        },
-        {
-          role: "user",
-          content: userText
-        }
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userText }
       ]
     })
   });
@@ -91,13 +84,7 @@ If user uses Tagalog or Cebuano, include one natural local word like “Sige”,
   const data = await response.json();
   console.log("OpenAI response:", JSON.stringify(data, null, 2));
 
-  const reply =
-  data.output_text ||
-  data.output?.[0]?.content?.[0]?.text ||
-  data.output?.[1]?.content?.[0]?.text ||
-  "Hi 😊 how can I help you today?";
-
-return reply;
+  return data.output_text || "Hi 😊 how can I help you today?";
 }
 
 async function sendMessage(senderId, text) {
