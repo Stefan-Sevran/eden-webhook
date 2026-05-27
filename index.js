@@ -131,6 +131,45 @@ async function sendMessage(senderId, text) {
   const data = await response.json();
   console.log("Send response:", data);
 }
+app.post("/eleven-postcall", async (req, res) => {
+  try {
+    const data = req.body;
+
+    const transcript =
+      data.transcript ||
+      data.conversation_transcript ||
+      JSON.stringify(data, null, 2);
+
+    const message = `
+🦷 AI Call Completed
+
+Clinic: Glow Dental Cebu
+Status: Needs clinic confirmation
+
+📞 Caller: ${data.caller_id || data.phone_number || "Unknown"}
+
+📝 Transcript:
+${transcript.slice(0, 3000)}
+`;
+
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text: message
+      })
+    });
+
+    res.status(200).send("ok");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("error");
+  }
+});
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
