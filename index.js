@@ -2052,34 +2052,60 @@ function createBookingTelegramCard(sessionId) {
     ? `\n🎯 Potential service: ${booking.potentialServiceName}\nPotential range: ${clinic.currencySymbol}${booking.potentialServiceValueMin.toLocaleString()}–${clinic.currencySymbol}${booking.potentialServiceValueMax.toLocaleString()}`
     : "";
 
+    const icons = {
+    updated: "\u{1F501}",
+    booking: "\u{1F9B7}",
+    lead: "\u{1F194}",
+    patient: "\u{1F464}",
+    contact: "\u{1F4F1}",
+    message: "\u{1F4AC}",
+    email: "\u{1F4E7}",
+    date: "\u{1F4C5}",
+    time: "\u{1F552}",
+    status: "\u{1F4CC}",
+    urgency: "\u26A1",
+    money: "\u{1F4B0}",
+    chart: "\u{1F4CA}",
+    target: "\u{1F3AF}",
+    human: "\u{1F91D}",
+    channel: "\u{1F517}"
+  };
+
+  const currencySymbol =
+    clinic.currency === "PHP"
+      ? "\u20B1"
+      : clinic.currencySymbol;
+
+  const potentialText = booking.potentialServiceName
+    ? `\n${icons.target} Potential service: ${booking.potentialServiceName}\nPotential range: ${currencySymbol}${booking.potentialServiceValueMin.toLocaleString()}-${currencySymbol}${booking.potentialServiceValueMax.toLocaleString()}`
+    : "";
+
   return `
-${isUpdate ? "🔁 UPDATED PATIENT BOOKING" : "🦷 NEW PATIENT BOOKING"} — ${clinic.clinicName.toUpperCase()}
+${isUpdate ? icons.updated + " UPDATED PATIENT BOOKING" : icons.booking + " NEW PATIENT BOOKING"} - ${clinic.clinicName.toUpperCase()}
 
-🆔 Lead: ${booking.leadId}
-👤 Patient: ${booking.patientName || "Not captured yet"}
-📱 Contact: ${contact}
-💬 Contact method: ${contactMethod}
-📧 Email: ${booking.email || "Not captured yet"}
+${icons.lead} Lead: ${booking.leadId}
+${icons.patient} Patient: ${booking.patientName || "Not captured yet"}
+${icons.contact} Contact: ${contact}
+${icons.message} Contact method: ${contactMethod}
+${icons.email} Email: ${booking.email || "Not captured yet"}
 
-🦷 Service: ${booking.serviceName || "Not identified yet"}
-📅 Requested date: ${booking.preferredDate || "Not captured yet"}
-🕒 Requested time: ${booking.preferredTime || "Not captured yet"}
-📌 Status: ${booking.bookingStatus}
-⚡ Urgency: ${booking.urgency}
+${icons.booking} Service: ${booking.serviceName || "Not identified yet"}
+${icons.date} Requested date: ${booking.preferredDate || "Not captured yet"}
+${icons.time} Requested time: ${booking.preferredTime || "Not captured yet"}
+${icons.status} Status: ${booking.bookingStatus}
+${icons.urgency} Urgency: ${booking.urgency}
 
-💰 Observable visit value: ${clinic.currencySymbol}${(booking.estimatedVisitValue || clinic.commercialModel.defaultVisitValue).toLocaleString()}
-📊 Indicative Eden fee (${Math.round((clinic.commercialModel.edenRate || 0) * 100)}%): ${clinic.currencySymbol}${estimatedFee.toLocaleString()}${potentialText}
+${icons.money} Observable visit value: ${currencySymbol}${(booking.estimatedVisitValue || clinic.commercialModel.defaultVisitValue).toLocaleString()}
+${icons.chart} Indicative Eden fee (${Math.round((clinic.commercialModel.edenRate || 0) * 100)}%): ${currencySymbol}${estimatedFee.toLocaleString()}${potentialText}
 
-💬 Latest patient message:
+${icons.message} Latest patient message:
 ${latestPatientMessage}
 
-🤝 Human follow-up: ${booking.humanFollowUpNeeded ? "Needed" : "Not yet required"}
-🔗 Channel: ${clinic.googleSheets?.channelLabel || "Website AI booking chat"}
+${icons.human} Human follow-up: ${booking.humanFollowUpNeeded ? "Needed" : "Not yet required"}
+${icons.channel} Channel: ${clinic.googleSheets?.channelLabel || "Website AI booking chat"}
 
 Session: ${sessionId}
 `.trim();
-}
-
 
 async function extractPatientBookingWithAI(sessionId) {
   try {
