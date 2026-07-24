@@ -39,7 +39,7 @@ const CLINICS = {
     country: "Philippines",
     timezone: "Asia/Manila",
     currency: "PHP",
-    currencySymbol: "₱",
+    currencySymbol: "\u20B1",
 
     status: "demo",
 
