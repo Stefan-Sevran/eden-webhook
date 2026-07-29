@@ -213,6 +213,43 @@ const CLINICS = {
   }
 };
 
+CLINICS["pattaya-smile"] = {
+  ...CLINICS.pearlsmile,
+
+  clinicId: "pattaya-smile",
+  clinicCode: "PST",
+  clinicName: "Pattaya Smile Dental",
+  assistantName: "Nida",
+
+  city: "Pattaya",
+  country: "Thailand",
+  timezone: "Asia/Bangkok",
+  currency: "THB",
+  currencySymbol: "฿",
+
+  status: "pilot",
+
+  contact: {
+    phone: "",
+    email: "",
+    address: "Pattaya, Thailand",
+    mapUrl: ""
+  },
+
+  languages: ["English", "Thai"],
+
+  telegram: {
+    bookingChatId: process.env.TELEGRAM_CHAT_ID_PATTAYA_SMILE_BOOKINGS
+  },
+
+  googleSheets: {
+    clinicLabel: "Pattaya Smile Dental",
+    channelLabel: "Website AI booking chat",
+    intakeUrl:
+      "https://script.google.com/macros/s/AKfycby_9UvHenDdcahFUwfiMfFiOIjyxl9LWSYquhof3XdALHFd1hpbkD4eGhty8RsJ_aKH/exec"
+  }
+};
+
 const SYSTEM_PROMPT = `
 You are Eden Clinic Network's AI Clinic Growth Auditor.
 
