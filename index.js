@@ -250,6 +250,8 @@ CLINICS["pattaya-smile"] = {
   }
 };
 
+console.log("Configured clinic IDs:", Object.keys(CLINICS));
+
 const SYSTEM_PROMPT = `
 You are Eden Clinic Network's AI Clinic Growth Auditor.
 
