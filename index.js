@@ -3408,6 +3408,21 @@ app.post("/booking-chat", async (req, res) => {
       req.body.sessionId ||
       `booking_${Date.now()}`;
 
+if (!CLINICS["pattaya-smile"]) {
+  CLINICS["pattaya-smile"] = {
+    ...CLINICS.pearlsmile,
+    clinicId: "pattaya-smile",
+    clinicCode: "PST",
+    clinicName: "Pattaya Smile Dental",
+    assistantName: "Nida",
+    city: "Pattaya",
+    country: "Thailand",
+    timezone: "Asia/Bangkok",
+    currency: "THB",
+    currencySymbol: "฿"
+  };
+}
+    
     const clinicId =
       req.body.clinicId ||
       "pearlsmile";
