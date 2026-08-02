@@ -2774,10 +2774,62 @@ function applyBookingFollowUpReply(booking, stage, rawReply) {
   return "INVALID_REPLY";
 }
 
+const humanHandoffLastAlertAt = {};
+const HUMAN_HANDOFF_COOLDOWN_MS = 30 * 60 * 1000;
+
+function patientNeedsHumanHelp(latestUserText) {
+  const text = String(latestUserText || '').toLowerCase();
+
+  return /\b(human|real person|live agent|talk (to|with) (a )?(person|human|staff|receptionist|team member)|speak (to|with) (a )?(person|human|staff|receptionist|team member)|call me|please call|urgent|emergency|help now)\b|พนักงาน|คนจริง|คุยกับคน|แอดมิน|เจ้าหน้าที่|ด่วน|ปวดฟัน|บวม|เลือดออก/i.test(
+    text
+  );
+}
+
+async function maybeSendHumanHandoffAlert(sessionId, latestUserText) {
+  if (!patientNeedsHumanHelp(latestUserText)) return;
+
+  const now = Date.now();
+  const lastAlertAt = humanHandoffLastAlertAt[sessionId] || 0;
+
+  if (now - lastAlertAt < HUMAN_HANDOFF_COOLDOWN_MS) return;
+
+  const clinicId = sessionClinicId[sessionId] || 'pearlsmile';
+  const clinic = getClinicConfig(clinicId);
+  if (!clinic) return;
+
+  const telegramChatId = clinic.telegram?.bookingChatId;
+  if (!telegramChatId) return;
+
+  const booking = ensurePatientBooking(sessionId, clinicId);
+  const message = [
+    '🚨 HUMAN FOLLOW-UP REQUEST — ' + clinic.clinicName.toUpperCase(),
+    '',
+    '🆔 Lead: ' + (booking.leadId || sessionId),
+    '👤 Patient: ' + (booking.patientName || 'Not captured yet'),
+    '📱 Phone: ' + (booking.phone || 'Not captured yet'),
+    '💬 WhatsApp: ' + (booking.whatsapp || 'Not captured yet'),
+    '🦷 Service: ' + (booking.serviceId || 'Not confirmed yet'),
+    '⚡ Action: Please contact this patient as soon as possible.',
+    '',
+    '💬 Latest patient message:',
+    String(latestUserText || '').trim(),
+    '',
+    '🔗 Channel: Website AI booking chat',
+    'Session: ' + sessionId
+  ].join('\n');
+
+  await sendTelegramTo(telegramChatId, message);
+  humanHandoffLastAlertAt[sessionId] = now;
+
+  console.log('Human handoff alert sent:', clinic.clinicName, sessionId);
+}
+
 async function maybeSendBookingAlert(sessionId, latestUserText) {
   const clinicId = sessionClinicId[sessionId] || "pearlsmile";
   const clinic = getClinicConfig(clinicId);
   if (!clinic) return;
+
+  await maybeSendHumanHandoffAlert(sessionId, latestUserText);
 
   updatePatientBookingHeuristically(sessionId, clinicId, latestUserText);
   await extractPatientBookingWithAI(sessionId);
@@ -2808,10 +2860,7 @@ async function maybeSendBookingAlert(sessionId, latestUserText) {
   if (bookingAlertSnapshots[sessionId] === importantSnapshot) return;
 
   const telegramChatId = clinic.telegram?.bookingChatId;
-  if (!telegramChatId) {
-    console.warn("Booking Telegram chat ID missing for:", clinic.clinicName);
-    return;
-  }
+  if (!telegramChatId) return;
 
   const message = createBookingTelegramCard(sessionId);
   if (!message) return;
