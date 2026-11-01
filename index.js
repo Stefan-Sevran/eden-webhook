@@ -3,6 +3,7 @@ const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
+const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -36,6 +37,10 @@ const outcomeLedger = createOutcomeLedger({
   key: process.env.SUPABASE_SECRET_KEY,
   resendKey: process.env.RESEND_API_KEY,
   fromEmail: process.env.RESEND_FROM_EMAIL
+});
+const clinicTenantApi = createClinicTenantApi({
+  url: process.env.SUPABASE_URL,
+  publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY
 });
 
 async function recordClinicOutcome(event) {
@@ -3187,6 +3192,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 function requireOpsAccess(req, res, next) {
+  res.set("Cache-Control", "no-store");
   if (!OPS_API_KEY) return res.sendStatus(503);
   if (!hasOpsAccess(req.get("authorization"), OPS_API_KEY)) return res.sendStatus(401);
   next();
@@ -3229,6 +3235,56 @@ app.post("/ops/dispatch-notifications", requireOpsAccess, async (_req, res) => {
   }
 });
 
+async function requireClinicUser(req, res, next) {
+  res.set("Cache-Control", "no-store");
+  try {
+    const identity = await clinicTenantApi.authenticate(req.get("authorization"));
+    if (identity.error) return res.sendStatus(identity.error);
+    req.clinicToken = identity.token;
+    req.clinicUserId = identity.userId;
+    next();
+  } catch (error) {
+    console.error("Clinic authentication failed:", error.message);
+    return res.sendStatus(503);
+  }
+}
+
+function clinicRoute(handler) {
+  return async (req, res) => {
+    try {
+      return res.json(await handler(req));
+    } catch (error) {
+      console.error("Clinic request failed:", error.message);
+      return res.sendStatus(error.status || 503);
+    }
+  };
+}
+
+app.get("/clinic/accounts", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.listAccounts(req.clinicToken)));
+app.post("/clinic/onboard", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.onboard(
+    req.clinicToken, req.body?.accountName, req.body?.locationName)));
+app.get("/clinic/locations", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.request(req.clinicToken,
+    clinicTenantApi.scopedPath("clinic_locations", req.query.accountId))));
+app.post("/clinic/locations", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.addLocation(req.clinicToken, req.body || {})));
+app.get("/clinic/connections", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.request(req.clinicToken,
+    clinicTenantApi.scopedPath("clinic_channel_connections", req.query.accountId,
+      { locationId: req.query.locationId }))));
+app.post("/clinic/connections", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.requestConnection(req.clinicToken, req.body || {})));
+app.get("/clinic/inbox", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.request(req.clinicToken,
+    clinicTenantApi.scopedPath("clinic_outcomes", req.query.accountId,
+      { locationId: req.query.locationId, limit: req.query.limit }))));
+app.get("/clinic/bookings", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.request(req.clinicToken,
+    clinicTenantApi.scopedPath("clinic_booking_cases", req.query.accountId,
+      { locationId: req.query.locationId, limit: req.query.limit }))));
+
 // Server-to-server entry point for a connected booking form. Never put the key
 // in browser JavaScript. A booking request is not a confirmed appointment.
 app.post("/integrations/booking-events", async (req, res) => {
@@ -3268,6 +3324,48 @@ app.post("/integrations/booking-events", async (req, res) => {
     return res.status(recorded.stored ? 201 : 200).json({ stored: recorded.stored });
   } catch (error) {
     console.error("Booking ingestion failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
+// The connected form backend, never the patient's browser, submits events.
+// Account and location are resolved from our database after checking that the
+// website channel has actually been marked connected.
+app.post("/integrations/tenant-booking-events", async (req, res) => {
+  if (!BOOKING_INGEST_KEY || !outcomeLedger.enabled) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), BOOKING_INGEST_KEY)) {
+    return res.sendStatus(401);
+  }
+  const { accountId, locationId, sourceEventId, bookingId, kind, status,
+    patientName, contact, service, requestedTime } = req.body || {};
+  if (!isUuid(accountId) || !isUuid(locationId) ||
+      !["booking.requested", "booking.updated", "booking.cancelled"].includes(kind) ||
+      ![sourceEventId, bookingId].every(value =>
+        typeof value === "string" && /^[a-zA-Z0-9:_-]{1,100}$/.test(value)) ||
+      (status !== undefined && !["AWAITING_CLINIC", "CONFIRMED", "RESCHEDULE_REQUESTED"].includes(status)) ||
+      (kind === "booking.requested" && status && status !== "AWAITING_CLINIC") ||
+      ![patientName, contact, service, requestedTime].every(value =>
+        typeof value === "string" && value.length <= 150)) return res.sendStatus(400);
+  try {
+    const location = await outcomeLedger.connectedLocation(accountId, locationId, "website_chat");
+    if (!location) return res.sendStatus(409);
+    const result = await recordClinicOutcome({
+      event_key: outcomeKey("tenant_form", accountId, locationId, sourceEventId),
+      clinic_id: locationId,
+      account_id: accountId,
+      location_id: locationId,
+      channel: "booking_form",
+      kind,
+      status: kind === "booking.cancelled" ? "CANCELLED" :
+        kind === "booking.requested" ? "AWAITING_CLINIC" : (status || "AWAITING_CLINIC"),
+      summary: `${location.name}: ${kind.replace(".", " ")}`,
+      details: { bookingId, patientName, contact, service, requestedTime },
+      notify_to: kind === "booking.requested" || kind === "booking.cancelled"
+        ? location.alert_email : null
+    });
+    return res.status(result.stored ? 201 : 200).json({ stored: result.stored });
+  } catch (error) {
+    console.error("Tenant booking ingestion failed:", error.message);
     return res.sendStatus(503);
   }
 });
