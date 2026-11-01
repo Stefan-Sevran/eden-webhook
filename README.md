@@ -81,3 +81,40 @@ The existing patient booking sessions and Messenger reply deduplication remain
 in process memory, so this is a single-service pilot, not a multi-clinic
 production launch. The ops endpoints are an internal JSON view; a tenant-scoped
 staff workspace and a durable message inbox are still needed for clinic rollout.
+
+## Account and location foundation
+
+After the ledger schema, run `sql/clinic-tenancy.sql` in the Supabase SQL editor.
+Set `SUPABASE_PUBLISHABLE_KEY` on Render for user-scoped API requests. This key
+can be used by a future client application; the existing `SUPABASE_SECRET_KEY`
+must stay server-only. Clinic endpoints verify the Supabase Auth access token
+with the Auth server and query PostgREST with that user's token, so database
+row-level policies restrict each account's records. The old Eden/demo events
+are unassigned and invisible to clinic users.
+
+With `Authorization: Bearer <Supabase Auth access token>`:
+
+| Endpoint | Role and result |
+| --- | --- |
+| `POST /clinic/onboard` | Signed-in user creates an account and first location from `accountName` and `locationName`, becoming owner. |
+| `GET /clinic/accounts` | Lists accounts belonging to the signed-in user. |
+| `GET /clinic/locations?accountId=...` | Lists that account's locations. |
+| `POST /clinic/locations` | Owner/admin adds a location with `accountId`, `name`, and IANA `timezone`. |
+| `GET /clinic/connections?accountId=...` | Lists channel connection statuses; optional `locationId`. |
+| `POST /clinic/connections` | Owner/admin requests a `website_chat`, `facebook_messenger`, or `ai_phone` connection using `accountId` and `locationId`. This cannot mark it connected. |
+| `GET /clinic/inbox?accountId=...` | Recent tenant outcomes; optional `locationId` and `limit`. |
+| `GET /clinic/bookings?accountId=...` | Latest state per tenant booking; optional `locationId` and `limit`. |
+
+The connected booking-form backend can call
+`POST /integrations/tenant-booking-events` with `BOOKING_INGEST_KEY` and
+`accountId`, `locationId`, `sourceEventId`, `bookingId`, `kind`, `patientName`,
+`contact`, `service`, and `requestedTime` (optional `status` for updates).
+The service looks up a `connected` website channel for the location and stores
+the account/location IDs itself. It returns 409 until that connection is
+verified. The key must never appear in a browser or downloaded widget.
+
+This is an API foundation, not a clinic-facing application. The connection
+request does not perform Meta authorization, domain verification, or phone
+forwarding. Staff invitations, an actual inbox interface, durable booking
+sessions, channel credential storage/rotation, a verified appointment source,
+and a payment source are still required before self-serve clinic launch.

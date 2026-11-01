@@ -55,6 +55,8 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
       body: JSON.stringify({
         event_key: event.event_key,
         clinic_id: event.clinic_id,
+        ...(event.account_id ? { account_id: event.account_id } : {}),
+        ...(event.location_id ? { location_id: event.location_id } : {}),
         channel: event.channel,
         kind: event.kind,
         status: event.status,
@@ -87,6 +89,23 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     });
     if (clinicId) params.set("clinic_id", `eq.${clinicId}`);
     return database(`clinic_booking_cases?${params}`);
+  }
+
+  async function connectedLocation(accountId, locationId, channel) {
+    if (!enabled) throw new Error("Outcome ledger is not configured");
+    const locationParams = new URLSearchParams({
+      select: "id,account_id,name,alert_email",
+      id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
+    });
+    const locations = await database(`clinic_locations?${locationParams}`);
+    if (!locations.length) return null;
+    const connectionParams = new URLSearchParams({
+      select: "id", account_id: `eq.${accountId}`,
+      location_id: `eq.${locationId}`, channel: `eq.${channel}`,
+      status: "eq.connected", limit: "1"
+    });
+    const connections = await database(`clinic_channel_connections?${connectionParams}`);
+    return connections.length ? locations[0] : null;
   }
 
   async function dispatch(batchSize = 10) {
@@ -153,7 +172,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return { claimed: rows.length, sent, failed };
   }
 
-  return { enabled, record, list, listBookings, dispatch };
+  return { enabled, record, list, listBookings, connectedLocation, dispatch };
 }
 
 module.exports = { outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger };
