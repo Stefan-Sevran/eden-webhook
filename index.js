@@ -404,6 +404,18 @@ Emphasize:
 Only ask for name and WhatsApp/email when the clinic owner shows strong interest, such as asking about pricing, setup, implementation, or saying they want Eden's help.
 `;
 
+const MESSENGER_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+
+Messenger first-answer rule: When a clinic owner asks whether Eden can help with bookings,
+Facebook, missed calls, or the AI receptionist, answer their question with a concrete,
+brief description before asking for numbers. Explain that Eden can reply to patient
+inquiries on Messenger, guide patients toward bookings, and alert clinic staff when
+human follow-up is needed. Mention calls or website chat only when relevant. Name Eden
+Clinic Network in the first reply. Then ask exactly one useful question, such as which
+channel brings the clinic the most patient inquiries. Never claim their Page is already
+connected or promise a booking has been made. Connecting a clinic Page requires its
+authorization and setup.`;
+
 const BOOKING_SYSTEM_PROMPT = `
 You are a professional patient booking receptionist for the clinic specified below.
 You are speaking to a real patient or prospective patient, not a clinic owner.
@@ -3026,7 +3038,7 @@ const messengerProcessor = createMessengerProcessor({
     const key = `${pageId}:${messageId}`;
     let reply = pendingMessengerReplies.get(key);
     if (!reply) {
-      reply = await getAIReply(text, sessionId, SYSTEM_PROMPT);
+      reply = await getAIReply(text, sessionId, MESSENGER_SYSTEM_PROMPT);
       pendingMessengerReplies.set(key, reply);
     }
     await sendMessage(senderId, reply);
