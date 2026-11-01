@@ -3260,6 +3260,16 @@ function clinicRoute(handler) {
   };
 }
 
+// Browser clients may receive this public project configuration. Never include
+// the service-role key, Page token, or any other server credential here.
+app.get("/clinic/public-config", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({
+    supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
+    publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null
+  });
+});
+
 app.get("/clinic/accounts", requireClinicUser,
   clinicRoute(req => clinicTenantApi.listAccounts(req.clinicToken)));
 app.post("/clinic/onboard", requireClinicUser,
