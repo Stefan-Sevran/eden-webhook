@@ -86,3 +86,42 @@ test("ElevenLabs signature checks raw body and rejects stale deliveries", () => 
   assert.equal(hasValidElevenSignature(Buffer.from("{}"), header, secret, timestamp + 10), false);
   assert.equal(hasValidElevenSignature(body, header, secret, timestamp + 1801), false);
 });
+
+test("tenant booking source resolves a connected location and stores ownership", async () => {
+  const requests = [];
+  const accountId = "9e939ec0-b740-448e-8a92-886548e922e2";
+  const locationId = "e2395766-3859-4c89-b452-6f3a7a9f9422";
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, options });
+    if (url.includes("clinic_locations?")) return {
+      ok: true, status: 200, json: async () => [{
+        id: locationId, account_id: accountId, name: "Cebu Clinic",
+        alert_email: "staff@example.com"
+      }]
+    };
+    if (url.includes("clinic_channel_connections?")) return {
+      ok: true, status: 200, json: async () => [{ id: "connection" }]
+    };
+    return { ok: true, status: 201, json: async () => [JSON.parse(options.body)] };
+  };
+  const ledger = createOutcomeLedger({
+    url: "https://db.example", key: "server-secret", fetchImpl
+  });
+  const location = await ledger.connectedLocation(accountId, locationId, "website_chat");
+  assert.equal(location.name, "Cebu Clinic");
+  await ledger.record({ event_key: "event-1", account_id: accountId,
+    location_id: locationId, clinic_id: locationId, channel: "booking_form",
+    kind: "booking.requested", status: "AWAITING_CLINIC", summary: "Request" });
+  const recorded = JSON.parse(requests.at(-1).options.body);
+  assert.equal(recorded.account_id, accountId);
+  assert.equal(recorded.location_id, locationId);
+});
+
+test("unconnected website channel cannot accept a tenant booking", async () => {
+  const ledger = createOutcomeLedger({
+    url: "https://db.example", key: "server-secret",
+    fetchImpl: async url => ({ ok: true, status: 200, json: async () =>
+      url.includes("clinic_locations?") ? [{ id: "location" }] : [] })
+  });
+  assert.equal(await ledger.connectedLocation("account", "location", "website_chat"), null);
+});
