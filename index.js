@@ -1,13 +1,21 @@
 const express = require("express");
 const cors = require("cors");
+const { createMessengerProcessor } = require("./messenger-events");
+const { hasValidMetaSignature } = require("./meta-signature");
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify(req, _res, buffer) {
+    if (req.path === "/webhook") req.rawBody = Buffer.from(buffer);
+  }
+}));
 
 const VERIFY_TOKEN = "eden_verify_123";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
+const META_PAGE_ID = process.env.META_PAGE_ID || "1086617101195136";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -3009,26 +3017,40 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+const pendingMessengerReplies = new Map();
+const messengerProcessor = createMessengerProcessor({
+  pageId: META_PAGE_ID,
+  async handleText({ pageId, senderId, text, messageId }) {
+    const sessionId = `messenger:${pageId}:${senderId}`;
+    sessionLeadType[sessionId] = "audit";
+    const key = `${pageId}:${messageId}`;
+    let reply = pendingMessengerReplies.get(key);
+    if (!reply) {
+      reply = await getAIReply(text, sessionId, SYSTEM_PROMPT);
+      pendingMessengerReplies.set(key, reply);
+    }
+    await sendMessage(senderId, reply);
+    pendingMessengerReplies.delete(key);
+  }
+});
+
 app.post("/webhook", async (req, res) => {
-  console.log("Incoming webhook:", JSON.stringify(req.body, null, 2));
+  if (!META_APP_SECRET) {
+    console.error("Messenger webhook is missing META_APP_SECRET");
+    return res.sendStatus(503);
+  }
+  if (!hasValidMetaSignature(
+    req.rawBody, req.get("x-hub-signature-256"), META_APP_SECRET
+  )) return res.sendStatus(403);
 
   try {
-    const messagingEvents = req.body.entry?.[0]?.messaging || [];
-
-    for (const messaging of messagingEvents) {
-      if (!messaging?.sender?.id || !messaging?.message?.text) continue;
-
-      const senderId = messaging.sender.id;
-      const userText = messaging.message.text;
-
-      const aiReply = await getAIReply(userText, senderId);
-      await sendMessage(senderId, aiReply);
-    }
+    const result = await messengerProcessor.processPayload(req.body);
+    console.log("Messenger webhook handled", result);
+    return res.sendStatus(200);
   } catch (error) {
-    console.error("Webhook error:", error);
+    console.error("Messenger webhook failed:", error);
+    return res.sendStatus(500);
   }
-
-  res.sendStatus(200);
 });
 
 async function getAIReply(userText, sessionId = "default", systemPrompt = SYSTEM_PROMPT) {
@@ -3082,7 +3104,7 @@ if (
     });
 
     const data = await response.json();
-    console.log("OpenAI response:", JSON.stringify(data, null, 2));
+    console.log("OpenAI status:", response.status, data.status || "unknown");
 
     let reply =
       data.output_text ||
@@ -3110,24 +3132,32 @@ if (
 }
 
 async function sendMessage(senderId, text) {
+  if (!PAGE_ACCESS_TOKEN) throw new Error("PAGE_ACCESS_TOKEN is missing");
   if (!text || text.trim() === "") {
     text = "Hi ðŸ˜Š how can I help you today?";
   }
 
   const response = await fetch(
-    `https://graph.facebook.com/v25.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+    `https://graph.facebook.com/v25.0/${META_PAGE_ID}/messages`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${PAGE_ACCESS_TOKEN}`
+      },
       body: JSON.stringify({
         recipient: { id: senderId },
+        message_type: "RESPONSE",
         message: { text }
       })
     }
   );
 
   const data = await response.json();
-  console.log("Send response:", data);
+  if (!response.ok || data.error) {
+    throw new Error(`Meta Send API failed: HTTP ${response.status}, code ${data.error?.code || "unknown"}`);
+  }
+  console.log("Messenger reply sent", { pageId: META_PAGE_ID, messageId: data.message_id });
 }
 
 app.post("/booking-followup-response", async (req, res) => {
