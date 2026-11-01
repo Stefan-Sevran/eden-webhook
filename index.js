@@ -2,13 +2,19 @@ const express = require("express");
 const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { hasValidMetaSignature } = require("./meta-signature");
+const { hasValidElevenSignature } = require("./eleven-signature");
+const {
+  outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
+} = require("./outcome-ledger");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json({
   verify(req, _res, buffer) {
-    if (req.path === "/webhook") req.rawBody = Buffer.from(buffer);
+    if (req.path === "/webhook" || req.path === "/eleven-postcall") {
+      req.rawBody = Buffer.from(buffer);
+    }
   }
 }));
 
@@ -20,6 +26,27 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const GOOGLE_SCRIPT_URL = process.env.GOOGLE_SCRIPT_URL;
+const ELEVEN_WEBHOOK_SECRET = process.env.ELEVEN_WEBHOOK_SECRET;
+const OPS_API_KEY = process.env.OPS_API_KEY;
+const BOOKING_INGEST_KEY = process.env.BOOKING_INGEST_KEY;
+const EDEN_ALERT_EMAIL = process.env.EDEN_ALERT_EMAIL;
+const clinicAlertEmails = parseAlertEmails(process.env.CLINIC_ALERT_EMAILS);
+const outcomeLedger = createOutcomeLedger({
+  url: process.env.SUPABASE_URL,
+  key: process.env.SUPABASE_SECRET_KEY,
+  resendKey: process.env.RESEND_API_KEY,
+  fromEmail: process.env.RESEND_FROM_EMAIL
+});
+
+async function recordClinicOutcome(event) {
+  const result = await outcomeLedger.record(event);
+  if (result.stored && event.notify_to) {
+    setImmediate(() => outcomeLedger.dispatch().catch(error => {
+      console.error("Outcome notification dispatch failed:", error.message);
+    }));
+  }
+  return result;
+}
 
 const sessions = {};
 const alertedSessions = {};
@@ -661,7 +688,7 @@ One question at a time.
 `;
 
 function getClinicConfig(clinicId) {
-  return CLINICS[clinicId] || null;
+  return Object.hasOwn(CLINICS, clinicId) ? CLINICS[clinicId] : null;
 }
 
 function getClinicName(clinicId) {
@@ -2817,10 +2844,30 @@ async function maybeSendHumanHandoffAlert(sessionId, latestUserText) {
   const clinic = getClinicConfig(clinicId);
   if (!clinic) return;
 
+  const booking = ensurePatientBooking(sessionId, clinicId);
+  await recordClinicOutcome({
+    event_key: outcomeKey("handoff", clinicId, sessionId, latestUserText),
+    clinic_id: clinicId,
+    channel: "website_chat",
+    kind: "escalation.requested",
+    status: "needs_human",
+    summary: "Patient requested human help in website chat.",
+    details: {
+      patientName: booking.patientName,
+      contact: booking.phone || booking.whatsapp || booking.email,
+      service: booking.serviceName
+    },
+    notify_to: clinicAlertEmails[clinicId]
+  });
+
   const telegramChatId = clinic.telegram?.bookingChatId;
+  if (outcomeLedger.enabled && clinicAlertEmails[clinicId] &&
+      process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) {
+    humanHandoffLastAlertAt[sessionId] = now;
+    return;
+  }
   if (!telegramChatId) return;
 
-  const booking = ensurePatientBooking(sessionId, clinicId);
   const message = [
     '🚨 HUMAN FOLLOW-UP REQUEST — ' + clinic.clinicName.toUpperCase(),
     '',
@@ -2879,6 +2926,35 @@ async function maybeSendBookingAlert(sessionId, latestUserText) {
 
   if (bookingAlertSnapshots[sessionId] === importantSnapshot) return;
 
+  await recordClinicOutcome({
+    event_key: outcomeKey("booking", clinicId, booking.leadId || sessionId, importantSnapshot),
+    clinic_id: clinicId,
+    channel: "website_chat",
+    kind: booking.bookingStatus === "AWAITING_CLINIC"
+      ? "booking.requested" : "booking.updated",
+    status: booking.bookingStatus,
+    summary: `${clinic.clinicName}: ${booking.serviceName || "patient inquiry"} (${booking.bookingStatus})`,
+    details: {
+      bookingId: booking.leadId || sessionId,
+      leadId: booking.leadId,
+      patientName: booking.patientName,
+      contact: booking.phone || booking.whatsapp || booking.email,
+      service: booking.serviceName,
+      requestedDate: booking.preferredDate,
+      requestedTime: booking.preferredTime,
+      urgency: booking.urgency,
+      humanFollowUpNeeded: booking.humanFollowUpNeeded
+    },
+    notify_to: booking.bookingStatus === "AWAITING_CLINIC" || booking.urgency === "URGENT"
+      ? clinicAlertEmails[clinicId] : null
+  });
+
+  if (outcomeLedger.enabled && clinicAlertEmails[clinicId] &&
+      process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) {
+    bookingAlertSnapshots[sessionId] = importantSnapshot;
+    return;
+  }
+
   const telegramChatId = clinic.telegram?.bookingChatId;
   if (!telegramChatId) return;
 
@@ -2887,7 +2963,7 @@ async function maybeSendBookingAlert(sessionId, latestUserText) {
 
   await sendTelegramTo(telegramChatId, message);
   bookingAlertSnapshots[sessionId] = importantSnapshot;
-  await saveBookingToGoogleSheets(sessionId);
+  if (!outcomeLedger.enabled) await saveBookingToGoogleSheets(sessionId);
 
   console.log("Booking alert sent:", clinic.clinicName, sessionId);
 }
@@ -3000,12 +3076,24 @@ auditPreviewHtmlBySession[sessionId] = buildAuditHtml({
 });
 const message = createTelegramLeadCard(sessionId, summary);
   
-  await saveLeadToGoogleSheets({
-  sessionId,
-  profileContext,
-  summary,
-  transcript
-});
+  await recordClinicOutcome({
+    event_key: outcomeKey("lead", sessionLeadType[sessionId], sessionId, alertSnapshot),
+    clinic_id: "eden",
+    channel: sessionId.startsWith("messenger:") ? "facebook_messenger" : "website_chat",
+    kind: "lead.qualified",
+    status: "needs_review",
+    summary: String(summary).slice(0, 500),
+    details: {
+      clinicName: updatedProfile.clinicName || "",
+      contact: updatedProfile.email || updatedProfile.whatsapp || "",
+      website: updatedProfile.website || "",
+      facebook: updatedProfile.facebook || ""
+    },
+    notify_to: EDEN_ALERT_EMAIL
+  });
+  if (!outcomeLedger.enabled) {
+    await saveLeadToGoogleSheets({ sessionId, profileContext, summary, transcript });
+  }
   
   await sendTelegram(message);
   if (hasImportantUpdate) {
@@ -3043,6 +3131,20 @@ const messengerProcessor = createMessengerProcessor({
     }
     await sendMessage(senderId, reply);
     pendingMessengerReplies.delete(key);
+    try {
+      await recordClinicOutcome({
+        event_key: outcomeKey("messenger_reply", pageId, messageId),
+        clinic_id: "eden",
+        channel: "facebook_messenger",
+        kind: "reply.sent",
+        status: "sent",
+        summary: "Eden Messenger replied to a clinic inquiry.",
+        details: { pageId, senderId }
+      });
+    } catch (error) {
+      // A ledger outage after Meta accepted the send must not trigger a second reply.
+      console.error("Messenger reply log failed:", error.message);
+    }
   }
 });
 
@@ -3056,12 +3158,117 @@ app.post("/webhook", async (req, res) => {
   )) return res.sendStatus(403);
 
   try {
+    for (const entry of req.body.entry || []) {
+      if (String(entry.id) !== META_PAGE_ID) continue;
+      for (const event of entry.messaging || []) {
+        if (!event?.message?.mid || !event?.message?.text || event.message.is_echo) continue;
+        await recordClinicOutcome({
+          event_key: outcomeKey("messenger_inbound", entry.id, event.message.mid),
+          clinic_id: "eden",
+          channel: "facebook_messenger",
+          kind: "inquiry.received",
+          status: "received",
+          summary: "New Messenger inquiry on Eden Clinic Network Page.",
+          details: {
+            pageId: String(entry.id),
+            senderId: String(event.sender?.id || ""),
+            preview: String(event.message.text).slice(0, 300)
+          }
+        });
+      }
+    }
     const result = await messengerProcessor.processPayload(req.body);
     console.log("Messenger webhook handled", result);
     return res.sendStatus(200);
   } catch (error) {
     console.error("Messenger webhook failed:", error);
     return res.sendStatus(500);
+  }
+});
+
+function requireOpsAccess(req, res, next) {
+  if (!OPS_API_KEY) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), OPS_API_KEY)) return res.sendStatus(401);
+  next();
+}
+
+app.get("/ops/outcomes", requireOpsAccess, async (req, res) => {
+  try {
+    const clinicId = String(req.query.clinicId || "");
+    if (clinicId && !/^[a-zA-Z0-9_-]{1,64}$/.test(clinicId)) {
+      return res.sendStatus(400);
+    }
+    const rows = await outcomeLedger.list({ clinicId, limit: req.query.limit });
+    return res.json({ outcomes: rows });
+  } catch (error) {
+    console.error("Outcome feed failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
+app.get("/ops/bookings", requireOpsAccess, async (req, res) => {
+  try {
+    const clinicId = String(req.query.clinicId || "");
+    if (clinicId && !/^[a-zA-Z0-9_-]{1,64}$/.test(clinicId)) {
+      return res.sendStatus(400);
+    }
+    const rows = await outcomeLedger.listBookings({ clinicId, limit: req.query.limit });
+    return res.json({ bookings: rows });
+  } catch (error) {
+    console.error("Booking queue failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
+app.post("/ops/dispatch-notifications", requireOpsAccess, async (_req, res) => {
+  try {
+    return res.json(await outcomeLedger.dispatch());
+  } catch (error) {
+    console.error("Notification dispatch failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
+// Server-to-server entry point for a connected booking form. Never put the key
+// in browser JavaScript. A booking request is not a confirmed appointment.
+app.post("/integrations/booking-events", async (req, res) => {
+  if (!BOOKING_INGEST_KEY || !outcomeLedger.enabled) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), BOOKING_INGEST_KEY)) {
+    return res.sendStatus(401);
+  }
+
+  const { clinicId, sourceEventId, bookingId, kind, status, patientName, contact,
+    service, requestedTime } = req.body || {};
+  if (!getClinicConfig(clinicId) ||
+      !["booking.requested", "booking.updated", "booking.cancelled"].includes(kind) ||
+      ![clinicId, sourceEventId, bookingId].every(value =>
+        typeof value === "string" && /^[a-zA-Z0-9:_-]{1,100}$/.test(value)) ||
+      (status !== undefined && !["AWAITING_CLINIC", "CONFIRMED", "RESCHEDULE_REQUESTED"].includes(status)) ||
+      (kind === "booking.requested" && status && status !== "AWAITING_CLINIC") ||
+      typeof contact !== "string" || contact.length > 150 ||
+      typeof patientName !== "string" || patientName.length > 150 ||
+      typeof service !== "string" || service.length > 150 ||
+      typeof requestedTime !== "string" || requestedTime.length > 100) {
+    return res.sendStatus(400);
+  }
+
+  try {
+    const recorded = await recordClinicOutcome({
+      event_key: outcomeKey("form", clinicId, sourceEventId),
+      clinic_id: clinicId,
+      channel: "booking_form",
+      kind,
+      status: kind === "booking.cancelled" ? "CANCELLED" :
+        kind === "booking.requested" ? "AWAITING_CLINIC" : (status || "AWAITING_CLINIC"),
+      summary: `${getClinicConfig(clinicId).clinicName}: ${kind.replace(".", " ")}`,
+      details: { bookingId, patientName, contact, service, requestedTime },
+      notify_to: kind === "booking.requested" || kind === "booking.cancelled"
+        ? clinicAlertEmails[clinicId] : null
+    });
+    return res.status(recorded.stored ? 201 : 200).json({ stored: recorded.stored });
+  } catch (error) {
+    console.error("Booking ingestion failed:", error.message);
+    return res.sendStatus(503);
   }
 });
 
@@ -3216,10 +3423,34 @@ app.post("/booking-followup-response", async (req, res) => {
 
     booking.updatedAt = new Date().toISOString();
     refreshBookingFollowUpPlan(booking, clinic);
-    await saveBookingToGoogleSheets(sessionId);
+    await recordClinicOutcome({
+      event_key: outcomeKey("booking_followup", clinicId, booking.leadId || sessionId,
+        stage, result, reply),
+      clinic_id: clinicId,
+      channel: "booking_followup",
+      kind: "booking.updated",
+      status: booking.bookingStatus,
+      summary: `${clinic.clinicName}: patient ${stage} response (${result})`,
+      details: {
+        bookingId: booking.leadId || sessionId,
+        leadId: booking.leadId,
+        patientName: booking.patientName,
+        contact: booking.phone || booking.whatsapp || booking.email,
+        service: booking.serviceName,
+        requestedDate: booking.preferredDate,
+        requestedTime: booking.preferredTime,
+        lifecycleStatus: booking.lifecycleStatus,
+        attendanceStatus: booking.attendanceStatus,
+        followupStage: stage,
+        followupResult: result
+      },
+      notify_to: clinicAlertEmails[clinicId]
+    });
+    if (!outcomeLedger.enabled) await saveBookingToGoogleSheets(sessionId);
 
     const telegramChatId = clinic.telegram?.bookingChatId;
-    if (telegramChatId) {
+    if (telegramChatId && !(outcomeLedger.enabled && clinicAlertEmails[clinicId] &&
+        process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL)) {
       await sendTelegramTo(
         telegramChatId,
         createBookingTelegramCard(sessionId)
@@ -3243,8 +3474,16 @@ app.post("/booking-followup-response", async (req, res) => {
 });
 
 app.post("/eleven-postcall", async (req, res) => {
+  if (outcomeLedger.enabled && !ELEVEN_WEBHOOK_SECRET) {
+    console.error("ElevenLabs webhook is missing ELEVEN_WEBHOOK_SECRET");
+    return res.sendStatus(503);
+  }
+  if (ELEVEN_WEBHOOK_SECRET && !hasValidElevenSignature(
+    req.rawBody, req.get("elevenlabs-signature"), ELEVEN_WEBHOOK_SECRET
+  )) return res.sendStatus(403);
+
   try {
-    const data = req.body;
+    const data = req.body?.data && req.body?.type ? req.body.data : req.body;
 
     const clinicId =
       data.clinicId ||
@@ -3255,10 +3494,12 @@ app.post("/eleven-postcall", async (req, res) => {
       getClinicConfig(clinicId) ||
       getClinicConfig("pearlsmile");
 
-    const transcript =
-      data.transcript ||
-      data.conversation_transcript ||
-      JSON.stringify(data, null, 2);
+    const rawTranscript = data.transcript || data.conversation_transcript || "";
+    const transcript = typeof rawTranscript === "string"
+      ? rawTranscript
+      : Array.isArray(rawTranscript)
+        ? rawTranscript.map(turn => `${turn.role || "speaker"}: ${turn.message || ""}`).join("\n")
+        : "";
 
     const caller =
       data.caller_id ||
@@ -3282,6 +3523,23 @@ app.post("/eleven-postcall", async (req, res) => {
       data.duration ||
       "";
 
+    if (outcomeLedger.enabled) {
+      await recordClinicOutcome({
+        event_key: outcomeKey("missed_call", clinic.clinicId, callSid || req.rawBody.toString("hex"), callStatus),
+        clinic_id: clinic.clinicId,
+        channel: "ai_phone",
+        kind: "call.followup_needed",
+        status: String(callStatus).slice(0, 80),
+        summary: `${clinic.clinicName}: AI call update requires review.`,
+        details: {
+          contact: String(caller).slice(0, 80),
+          callSid: String(callSid).slice(0, 100),
+          duration: String(callDuration).slice(0, 30)
+        },
+        notify_to: clinicAlertEmails[clinic.clinicId]
+      });
+    }
+
     const message = `
 \u{1F4DE} MISSED CALL / AI CALL UPDATE
 
@@ -3297,22 +3555,27 @@ ${transcript.slice(0, 3000)}
 
     const telegramChatId = clinic.telegram?.bookingChatId;
 
-    if (telegramChatId) {
-      await sendTelegramTo(telegramChatId, message);
-    } else {
-      await sendTelegram(message);
+    if (!(outcomeLedger.enabled && clinicAlertEmails[clinic.clinicId] &&
+        process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL)) {
+      if (telegramChatId) {
+        await sendTelegramTo(telegramChatId, message);
+      } else {
+        await sendTelegram(message);
+      }
     }
 
-    await saveMissedCallToGoogleSheets({
-      clinic,
-      clinicId: clinic.clinicId,
-      caller,
-      callSid,
-      callStatus,
-      callDuration,
-      transcript,
-      summary: "Missed call or completed AI call requires clinic review."
-    });
+    if (!outcomeLedger.enabled) {
+      await saveMissedCallToGoogleSheets({
+        clinic,
+        clinicId: clinic.clinicId,
+        caller,
+        callSid,
+        callStatus,
+        callDuration,
+        transcript,
+        summary: "Missed call or completed AI call requires clinic review."
+      });
+    }
 
     res.status(200).send("ok");
   } catch (err) {
