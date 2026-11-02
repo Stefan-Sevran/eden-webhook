@@ -3,6 +3,7 @@ const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
+const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
 const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
@@ -3286,6 +3287,28 @@ app.get("/clinic/connections", requireClinicUser,
       { locationId: req.query.locationId }))));
 app.post("/clinic/connections", requireClinicUser,
   clinicRoute(req => clinicTenantApi.requestConnection(req.clinicToken, req.body || {})));
+
+// An operator assigns a dedicated ElevenLabs agent and forwarding destination
+// to an existing clinic request. The first signed inbound test call activates it.
+app.post("/ops/voice-connections", async (req, res) => {
+  if (!OPS_API_KEY || !outcomeLedger.enabled) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), OPS_API_KEY)) return res.sendStatus(401);
+  const { accountId, locationId, agentId, forwardingNumber } = req.body || {};
+  if (!isUuid(accountId) || !isUuid(locationId) ||
+      !AGENT_ID.test(agentId || "") || !E164.test(forwardingNumber || "")) {
+    return res.sendStatus(400);
+  }
+  try {
+    const connection = await outcomeLedger.provisionVoiceConnection(
+      accountId, locationId, agentId, forwardingNumber);
+    if (!connection) return res.sendStatus(409);
+    return res.status(202).json({ status: connection.status,
+      accountId, locationId, forwardingNumber });
+  } catch (error) {
+    console.error("Voice provisioning failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
 app.get("/clinic/inbox", requireClinicUser,
   clinicRoute(req => clinicTenantApi.request(req.clinicToken,
     clinicTenantApi.scopedPath("clinic_outcomes", req.query.accountId,
@@ -3376,6 +3399,38 @@ app.post("/integrations/tenant-booking-events", async (req, res) => {
     return res.status(result.stored ? 201 : 200).json({ stored: result.stored });
   } catch (error) {
     console.error("Tenant booking ingestion failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
+// The voice agent's server-side booking tool submits a request, never a
+// confirmed appointment. Credentials must remain in the provider tool config.
+app.post("/integrations/tenant-voice-booking-events", async (req, res) => {
+  if (!BOOKING_INGEST_KEY || !outcomeLedger.enabled) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), BOOKING_INGEST_KEY)) return res.sendStatus(401);
+  const { agentId, calledNumber, conversationId, sourceEventId,
+    patientName, contact, service, requestedTime } = req.body || {};
+  if (!AGENT_ID.test(agentId || "") || !E164.test(calledNumber || "") ||
+      ![conversationId, sourceEventId].every(value =>
+        typeof value === "string" && /^[a-zA-Z0-9_-]{4,120}$/.test(value)) ||
+      ![patientName, contact, service, requestedTime].every(value =>
+        typeof value === "string" && value.length <= 150)) return res.sendStatus(400);
+  try {
+    const route = await outcomeLedger.voiceLocation(agentId, calledNumber);
+    if (!route || route.status !== "connected") return res.sendStatus(409);
+    const location = route.location;
+    const result = await recordClinicOutcome({
+      event_key: outcomeKey("tenant_voice_booking", agentId, conversationId, sourceEventId),
+      clinic_id: location.id, account_id: route.account_id, location_id: location.id,
+      channel: "ai_phone", kind: "booking.requested", status: "AWAITING_CLINIC",
+      summary: `${location.name}: booking requested by phone`,
+      details: { bookingId: conversationId, conversationId, patientName,
+        contact, service, requestedTime },
+      notify_to: location.alert_email
+    });
+    return res.status(result.stored ? 201 : 200).json({ stored: result.stored });
+  } catch (error) {
+    console.error("Voice booking ingestion failed:", error.message);
     return res.sendStatus(503);
   }
 });
@@ -3591,16 +3646,44 @@ app.post("/eleven-postcall", async (req, res) => {
   )) return res.sendStatus(403);
 
   try {
+    // Typed ElevenLabs events are scoped solely by the signed agent and the
+    // actual inbound destination. Clinic IDs from the payload are never trusted.
+    if (req.body?.type) {
+      if (req.body.type !== "post_call_transcription") return res.sendStatus(200);
+      const data = req.body.data;
+      const identity = voiceIdentity(data);
+      if (!identity || !outcomeLedger.enabled) return res.sendStatus(202);
+      const route = await outcomeLedger.voiceLocation(identity.agentId, identity.calledNumber);
+      if (!route) return res.sendStatus(202);
+      const location = route.location;
+      const summary = typeof data.analysis?.transcript_summary === "string"
+        ? data.analysis.transcript_summary.slice(0, 500) : "AI call needs staff review.";
+      const result = await recordClinicOutcome({
+        event_key: outcomeKey("tenant_voice", identity.agentId, identity.conversationId),
+        clinic_id: location.id, account_id: route.account_id, location_id: location.id,
+        channel: "ai_phone", kind: "call.followup_needed",
+        status: "AWAITING_CLINIC", summary: `${location.name}: ${summary}`,
+        details: { contact: identity.caller, conversationId: identity.conversationId,
+          calledNumber: identity.calledNumber,
+          duration: Number.isFinite(data.metadata?.call_duration_secs)
+            ? data.metadata.call_duration_secs : null },
+        notify_to: location.alert_email
+      });
+      if (route.status === "verifying") {
+        await outcomeLedger.activateVoiceConnection(route);
+      }
+      return res.status(result.stored ? 201 : 200).json({ stored: result.stored });
+    }
+
     const data = req.body?.data && req.body?.type ? req.body.data : req.body;
 
     const clinicId =
       data.clinicId ||
       data.clinic_id ||
-      "pearlsmile";
+      "";
 
-    const clinic =
-      getClinicConfig(clinicId) ||
-      getClinicConfig("pearlsmile");
+    const clinic = getClinicConfig(clinicId);
+    if (!clinic) return res.sendStatus(202);
 
     const rawTranscript = data.transcript || data.conversation_transcript || "";
     const transcript = typeof rawTranscript === "string"

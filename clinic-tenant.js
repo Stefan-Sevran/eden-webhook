@@ -54,7 +54,7 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     } else if (table === "clinic_locations") {
       params.set("select", "id,account_id,name,timezone,alert_email,created_at");
     } else if (table === "clinic_channel_connections") {
-      params.set("select", "id,account_id,location_id,channel,status,external_id,updated_at");
+      params.set("select", "id,account_id,location_id,channel,status,external_id,forwarding_number,updated_at");
     }
     return `${table}?${params}`;
   }

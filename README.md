@@ -118,3 +118,28 @@ request does not perform Meta authorization, domain verification, or phone
 forwarding. Staff invitations, an actual inbox interface, durable booking
 sessions, channel credential storage/rotation, a verified appointment source,
 and a payment source are still required before self-serve clinic launch.
+
+### AI phone pilot routing
+
+Apply `sql/clinic-voice-connections.sql` after the tenant schema. An owner first
+requests `ai_phone` for a location. An operator configures a **dedicated**
+ElevenLabs agent and E.164 destination number, sets the forwarding from the
+clinic's existing number, and calls `POST /ops/voice-connections` with
+`Authorization: Bearer <OPS_API_KEY>` and JSON `accountId`, `locationId`,
+`agentId`, `forwardingNumber` (the destination on ElevenLabs, not the clinic's
+public number). The connection becomes `verifying`. A signed inbound
+`post_call_transcription` webhook to `/eleven-postcall` must carry the same
+agent and called destination; it adds a tenant-scoped call to the clinic inbox
+and changes the connection to `connected`. A different agent, number, or
+outbound call cannot activate it. Provide `ELEVEN_WEBHOOK_SECRET` on Render.
+
+Configure the agent's server-side booking tool to call
+`POST /integrations/tenant-voice-booking-events` with
+`Authorization: Bearer <BOOKING_INGEST_KEY>` and `agentId`, `calledNumber`,
+`conversationId`, `sourceEventId`, `patientName`, `contact`, `service`,
+`requestedTime`. The tool must use the actual inbound destination and a stable
+source event ID. Only a connected route can create `booking.requested`, and it
+remains awaiting staff confirmation. Set a location `alert_email` and configure
+Resend for durable email alerts; otherwise the call is visible in the inbox
+with notification state `not_configured`. This is not automated carrier
+forwarding setup, appointment confirmation, or SMS activation.
