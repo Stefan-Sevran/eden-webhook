@@ -1,7 +1,7 @@
 // Run against a migrated Supabase project with two unrelated disposable Auth users.
 // Never use staff accounts or real patient data for this test.
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const required = ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY',
   'CLINIC_TEST_TOKEN_A', 'CLINIC_TEST_TOKEN_B', 'CLINIC_TEST_API_BASE'];
@@ -54,7 +54,7 @@ try {
     assert.deepEqual(foreignLocations.data, [], 'Foreign location leaked');
   }
   for (let who = 0; who < 2; who++) {
-    const eventKey = `${prefix}-${who}`;
+    const eventKey = createHash('sha256').update(`${prefix}-${who}`).digest('hex');
     eventKeys.push(eventKey);
     const inserted = await call(project + '/rest/v1/clinic_outcomes', secret, {
       method: 'POST', body: JSON.stringify({
@@ -78,13 +78,29 @@ try {
     const foreignConnections = await app('/clinic/connections' + query(accounts[1-who]), who);
     assert.equal(foreignConnections.status, 200);
     assert.deepEqual(foreignConnections.data, [], 'Foreign connections leaked');
+    const ownAction = await app('/clinic/followups', who, { method: 'POST',
+      body: JSON.stringify({ accountId: accounts[who], locationId: locations[who],
+        eventKey: eventKeys[who], action: 'handled' }) });
+    assert.equal(ownAction.status, 200, 'Own follow-up action was rejected');
+    const ownStates = await app('/clinic/followups' + query(accounts[who]), who);
+    assert.equal(ownStates.status, 200);
+    assert(ownStates.data.some(row => row.event_key === eventKeys[who] &&
+      row.action === 'handled'), 'Own follow-up state missing');
+    const foreignStates = await app('/clinic/followups' + query(accounts[1-who]), who);
+    assert.equal(foreignStates.status, 200);
+    assert.deepEqual(foreignStates.data, [], 'Foreign follow-up state leaked');
+    const foreignAction = await app('/clinic/followups', who, { method: 'POST',
+      body: JSON.stringify({ accountId: accounts[1-who], locationId: locations[1-who],
+        eventKey: eventKeys[1-who], action: 'handled' }) });
+    assert.notEqual(foreignAction.status, 200, 'Foreign follow-up action accepted');
+    assert.notEqual(foreignAction.status, 201, 'Foreign follow-up action accepted');
     const denied = await app('/clinic/locations', who, { method: 'POST', body: JSON.stringify({
       accountId: accounts[1-who], name: 'Intruder test', timezone: 'Asia/Manila'
     }) });
     assert.notEqual(denied.status, 200, 'Foreign account accepted location write');
     assert.notEqual(denied.status, 201, 'Foreign account accepted location write');
   }
-  console.log('PASS: two real users, account and location reads, seeded inbox and booking isolation, connection reads, and denied cross-account writes.');
+  console.log('PASS: two real users, tenant inbox and booking isolation, follow-up reads and writes, connection reads, and denied cross-account writes.');
 } finally {
   // Clean only records created by this run. A cleanup failure must be visible.
   for (const eventKey of eventKeys) {
