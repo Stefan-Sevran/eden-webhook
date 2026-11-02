@@ -54,7 +54,9 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     } else if (table === "clinic_locations") {
       params.set("select", "id,account_id,name,timezone,alert_email,created_at");
     } else if (table === "clinic_channel_connections") {
-      params.set("select", "id,account_id,location_id,channel,status,external_id,updated_at");
+      params.set("select", "id,account_id,location_id,channel,status,external_id,forwarding_number,updated_at");
+    } else if (table === "clinic_followup_states") {
+      params.set("select", "event_key,account_id,location_id,action,actor_user_id,created_at");
     }
     return `${table}?${params}`;
   }
@@ -103,8 +105,23 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     });
   }
 
+  async function appendFollowup(token, userId, { accountId, locationId, eventKey, action }) {
+    scopedPath("clinic_locations", accountId, { locationId });
+    if (!UUID.test(userId || "") || !/^[a-f0-9]{64}$/.test(eventKey || "") ||
+        !["handled", "reopened"].includes(action)) {
+      const error = new Error("Invalid follow-up action");
+      error.status = 400;
+      throw error;
+    }
+    return request(token, "clinic_followup_actions", {
+      method: "POST", prefer: "return=representation",
+      body: { account_id: accountId, location_id: locationId,
+        event_key: eventKey, actor_user_id: userId, action }
+    });
+  }
+
   return { enabled, authenticate, request, scopedPath, listAccounts, onboard,
-    requestConnection, addLocation };
+    requestConnection, addLocation, appendFollowup };
 }
 
 module.exports = { createClinicTenantApi, isUuid: value => UUID.test(value || "") };

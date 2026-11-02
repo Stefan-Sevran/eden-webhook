@@ -108,6 +108,55 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return connections.length ? locations[0] : null;
   }
 
+  async function provisionVoiceConnection(accountId, locationId, agentId, number) {
+    if (!enabled) throw new Error("Outcome ledger is not configured");
+    const locationParams = new URLSearchParams({
+      select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
+    });
+    if (!(await database(`clinic_locations?${locationParams}`)).length) return null;
+    const params = new URLSearchParams({
+      select: "id,account_id,location_id,status,external_id,forwarding_number",
+      account_id: `eq.${accountId}`, location_id: `eq.${locationId}`,
+      channel: "eq.ai_phone", status: "in.(requested,action_required)", limit: "1"
+    });
+    const rows = await database(`clinic_channel_connections?${params}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: "verifying", external_id: agentId,
+        forwarding_number: number, updated_at: new Date().toISOString() })
+    });
+    return rows[0] || null;
+  }
+
+  async function voiceLocation(agentId, number) {
+    if (!enabled) throw new Error("Outcome ledger is not configured");
+    const params = new URLSearchParams({
+      select: "id,account_id,location_id,status", channel: "eq.ai_phone",
+      status: "in.(verifying,connected)", external_id: `eq.${agentId}`,
+      forwarding_number: `eq.${number}`, limit: "2"
+    });
+    const routes = await database(`clinic_channel_connections?${params}`);
+    if (routes.length !== 1) return null;
+    const route = routes[0];
+    const locationParams = new URLSearchParams({
+      select: "id,account_id,name,alert_email", id: `eq.${route.location_id}`,
+      account_id: `eq.${route.account_id}`, limit: "1"
+    });
+    const locations = await database(`clinic_locations?${locationParams}`);
+    return locations.length ? { ...route, location: locations[0] } : null;
+  }
+
+  async function activateVoiceConnection(route) {
+    const params = new URLSearchParams({
+      select: "id", id: `eq.${route.id}`, account_id: `eq.${route.account_id}`,
+      location_id: `eq.${route.location_id}`, status: "eq.verifying", limit: "1"
+    });
+    const rows = await database(`clinic_channel_connections?${params}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: "connected", updated_at: new Date().toISOString() })
+    });
+    return rows.length > 0;
+  }
+
   async function dispatch(batchSize = 10) {
     if (!enabled || !resendKey || !fromEmail) {
       return { claimed: 0, sent: 0, failed: 0, reason: "email_not_configured" };
@@ -172,7 +221,8 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return { claimed: rows.length, sent, failed };
   }
 
-  return { enabled, record, list, listBookings, connectedLocation, dispatch };
+  return { enabled, record, list, listBookings, connectedLocation,
+    provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch };
 }
 
 module.exports = { outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger };

@@ -103,6 +103,8 @@ With `Authorization: Bearer <Supabase Auth access token>`:
 | `GET /clinic/connections?accountId=...` | Lists channel connection statuses; optional `locationId`. |
 | `POST /clinic/connections` | Owner/admin requests a `website_chat`, `facebook_messenger`, or `ai_phone` connection using `accountId` and `locationId`. This cannot mark it connected. |
 | `GET /clinic/inbox?accountId=...` | Recent tenant outcomes; optional `locationId` and `limit`. |
+| `GET /clinic/followups?accountId=...` | Latest staff action per outcome, scoped by account and optional `locationId`. |
+| `POST /clinic/followups` | Signed-in member appends `handled` or `reopened` for a call or booking request using `accountId`, `locationId`, `eventKey`, and `action`. The actor is taken from the verified session. |
 | `GET /clinic/bookings?accountId=...` | Latest state per tenant booking; optional `locationId` and `limit`. |
 
 The connected booking-form backend can call
@@ -118,3 +120,34 @@ request does not perform Meta authorization, domain verification, or phone
 forwarding. Staff invitations, an actual inbox interface, durable booking
 sessions, channel credential storage/rotation, a verified appointment source,
 and a payment source are still required before self-serve clinic launch.
+
+### AI phone pilot routing
+
+Apply `sql/clinic-voice-connections.sql` and then
+`sql/clinic-followup-actions.sql` after the tenant schema. An owner first
+requests `ai_phone` for a location. An operator configures a **dedicated**
+ElevenLabs agent and E.164 destination number, sets the forwarding from the
+clinic's existing number, and calls `POST /ops/voice-connections` with
+`Authorization: Bearer <OPS_API_KEY>` and JSON `accountId`, `locationId`,
+`agentId`, `forwardingNumber` (the destination on ElevenLabs, not the clinic's
+public number). The connection becomes `verifying`. A signed inbound
+`post_call_transcription` webhook to `/eleven-postcall` must carry the same
+agent and called destination; it adds a tenant-scoped call to the clinic inbox
+and changes the connection to `connected`. A different agent, number, or
+outbound call cannot activate it. Provide `ELEVEN_WEBHOOK_SECRET` on Render.
+
+Configure the agent's server-side booking tool to call
+`POST /integrations/tenant-voice-booking-events` with
+`Authorization: Bearer <BOOKING_INGEST_KEY>` and `agentId`, `calledNumber`,
+`conversationId`, `sourceEventId`, `patientName`, `contact`, `service`,
+`requestedTime`. The tool must use the actual inbound destination and a stable
+source event ID. Only a connected route can create `booking.requested`, and it
+remains awaiting staff confirmation. Set a location `alert_email` and configure
+Resend for durable email alerts; otherwise the call is visible in the inbox
+with notification state `not_configured`. This is not automated carrier
+forwarding setup, appointment confirmation, or SMS activation.
+
+Staff actions are append-only and tenant-scoped in `clinic_followup_actions`.
+The current state comes from the invoker-security `clinic_followup_states`
+view. Marking a booking request handled records staff follow-up, not a
+confirmed appointment or paid visit.
