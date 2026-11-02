@@ -103,6 +103,8 @@ With `Authorization: Bearer <Supabase Auth access token>`:
 | `GET /clinic/connections?accountId=...` | Lists channel connection statuses; optional `locationId`. |
 | `POST /clinic/connections` | Owner/admin requests a `website_chat`, `facebook_messenger`, or `ai_phone` connection using `accountId` and `locationId`. This cannot mark it connected. |
 | `GET /clinic/inbox?accountId=...` | Recent tenant outcomes; optional `locationId` and `limit`. |
+| `GET /clinic/followups?accountId=...` | Latest staff action per outcome, scoped by account and optional `locationId`. |
+| `POST /clinic/followups` | Signed-in member appends `handled` or `reopened` for a call or booking request using `accountId`, `locationId`, `eventKey`, and `action`. The actor is taken from the verified session. |
 | `GET /clinic/bookings?accountId=...` | Latest state per tenant booking; optional `locationId` and `limit`. |
 
 The connected booking-form backend can call
@@ -121,7 +123,8 @@ and a payment source are still required before self-serve clinic launch.
 
 ### AI phone pilot routing
 
-Apply `sql/clinic-voice-connections.sql` after the tenant schema. An owner first
+Apply `sql/clinic-voice-connections.sql` and then
+`sql/clinic-followup-actions.sql` after the tenant schema. An owner first
 requests `ai_phone` for a location. An operator configures a **dedicated**
 ElevenLabs agent and E.164 destination number, sets the forwarding from the
 clinic's existing number, and calls `POST /ops/voice-connections` with
@@ -143,3 +146,8 @@ remains awaiting staff confirmation. Set a location `alert_email` and configure
 Resend for durable email alerts; otherwise the call is visible in the inbox
 with notification state `not_configured`. This is not automated carrier
 forwarding setup, appointment confirmation, or SMS activation.
+
+Staff actions are append-only and tenant-scoped in `clinic_followup_actions`.
+The current state comes from the invoker-security `clinic_followup_states`
+view. Marking a booking request handled records staff follow-up, not a
+confirmed appointment or paid visit.

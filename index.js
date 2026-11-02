@@ -3313,6 +3313,13 @@ app.get("/clinic/inbox", requireClinicUser,
   clinicRoute(req => clinicTenantApi.request(req.clinicToken,
     clinicTenantApi.scopedPath("clinic_outcomes", req.query.accountId,
       { locationId: req.query.locationId, limit: req.query.limit }))));
+app.get("/clinic/followups", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.request(req.clinicToken,
+    clinicTenantApi.scopedPath("clinic_followup_states", req.query.accountId,
+      { locationId: req.query.locationId }))));
+app.post("/clinic/followups", requireClinicUser,
+  clinicRoute(req => clinicTenantApi.appendFollowup(
+    req.clinicToken, req.clinicUserId, req.body || {})));
 app.get("/clinic/bookings", requireClinicUser,
   clinicRoute(req => clinicTenantApi.request(req.clinicToken,
     clinicTenantApi.scopedPath("clinic_booking_cases", req.query.accountId,

@@ -57,3 +57,30 @@ test("onboarding rejects invalid names before calling the database", async () =>
   await assert.rejects(api.onboard("user-token", "A", "First clinic"),
     { status: 400 });
 });
+
+test("staff follow-up uses the authenticated actor and a scoped outcome", async () => {
+  const calls = [];
+  const api = createClinicTenantApi({
+    url: "https://project.supabase.co", publishableKey: "public-key",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 201, json: async () => [{ action: "handled" }] };
+    }
+  });
+  const eventKey = "a".repeat(64);
+  await api.appendFollowup("user-token", userId, {
+    accountId, locationId, eventKey, action: "handled", actor_user_id: "other-user"
+  });
+  const row = JSON.parse(calls[0].options.body);
+  assert.equal(row.actor_user_id, userId);
+  assert.equal(row.account_id, accountId);
+  assert.equal(row.location_id, locationId);
+  assert.equal(row.event_key, eventKey);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer user-token");
+  assert.match(api.scopedPath("clinic_followup_states", accountId, { locationId }),
+    /location_id=eq\.e2395766/);
+  await assert.rejects(api.appendFollowup("user-token", userId, {
+    accountId, locationId, eventKey: "wrong", action: "handled"
+  }), { status: 400 });
+  assert.equal(calls.length, 1);
+});
