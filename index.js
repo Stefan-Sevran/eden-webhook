@@ -3659,9 +3659,9 @@ app.post("/eleven-postcall", async (req, res) => {
       if (req.body.type !== "post_call_transcription") return res.sendStatus(200);
       const data = req.body.data;
       const identity = voiceIdentity(data);
-      if (!identity || !outcomeLedger.enabled) return res.sendStatus(202);
+      if (!identity || !outcomeLedger.enabled) return res.sendStatus(200);
       const route = await outcomeLedger.voiceLocation(identity.agentId, identity.calledNumber);
-      if (!route) return res.sendStatus(202);
+      if (!route) return res.sendStatus(200);
       const location = route.location;
       const summary = typeof data.analysis?.transcript_summary === "string"
         ? data.analysis.transcript_summary.slice(0, 500) : "AI call needs staff review.";
@@ -3679,7 +3679,8 @@ app.post("/eleven-postcall", async (req, res) => {
       if (route.status === "verifying") {
         await outcomeLedger.activateVoiceConnection(route);
       }
-      return res.status(result.stored ? 201 : 200).json({ stored: result.stored });
+      // ElevenLabs expects HTTP 200 for successfully processed post-call webhooks.
+      return res.status(200).json({ stored: result.stored });
     }
 
     const data = req.body?.data && req.body?.type ? req.body.data : req.body;
