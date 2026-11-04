@@ -5,7 +5,7 @@ alter table public.clinic_locations
   check (
     alert_email is null or (
       length(alert_email) <= 254
-      and alert_email ~ $email$^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$email$
+      and alert_email ~ '^[A-Za-z0-9.!#$%&''*+/=?^_`{|}~-]+@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$'
     )
   ) not valid;
 
