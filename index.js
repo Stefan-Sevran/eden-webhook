@@ -3267,7 +3267,9 @@ app.get("/clinic/public-config", (_req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
-    publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null
+    publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
+    staffEmailAvailable: Boolean(outcomeLedger.enabled &&
+      process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL)
   });
 });
 
