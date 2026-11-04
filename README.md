@@ -147,6 +147,67 @@ Resend for durable email alerts; otherwise the call is visible in the inbox
 with notification state `not_configured`. This is not automated carrier
 forwarding setup, appointment confirmation, or SMS activation.
 
+
+### Incoming voice router (opt-in pilot)
+
+Keep the verified ElevenLabs destination on its native Twilio integration.
+Use a separate, approved Twilio ingress number for the pilot. Set its incoming
+Voice webhook to POST `<VOICE_ROUTER_BASE_URL>/voice/inbound`. Use a
+provider-hosted TwiML fallback for ingress webhook failures, with a tested
+backup destination. The backup and staff lines must be direct destinations
+that cannot forward back to the clinic or the router.
+
+Server configuration:
+
+- `VOICE_ROUTER_BASE_URL` is the exact public HTTPS origin Twilio calls.
+- `TWILIO_VOICE_ACCOUNT_SID` and `TWILIO_VOICE_AUTH_TOKEN` identify the Twilio
+  account owning the ingress numbers and validate signed POSTs.
+- `VOICE_ROUTER_ROUTES` is a JSON array keyed internally by ingress number.
+  Use the same dedicated AI destination already verified for that clinic
+  workspace. The examples below contain fictional phone numbers.
+
+```json
+[
+  {
+    "mode": "managed",
+    "ingressNumber": "+12025550101",
+    "clinicNumber": "+12025550102",
+    "staffNumber": "+12025550103",
+    "aiNumber": "+12025550104",
+    "fallbackNumber": "+12025550105",
+    "timeZone": "Asia/Manila",
+    "ringSeconds": 25,
+    "hours": { "Mon": [["09:00", "18:00"]], "Tue": [["09:00", "18:00"]] }
+  }
+]
+```
+
+With `managed` routing, staff ring first during configured open hours and
+the agent takes over on no answer, busy, or a failed staff leg. The agent
+answers first outside those hours. Omitted hours mean staff ring first at
+all times. Set the staff timeout with enough margin for the staff line's
+voicemail pickup, and test it on the real carrier.
+
+For a clinic on carrier-side conditional forwarding, set `mode` to
+`conditional_forwarding`. The carrier handles staff ringing and forwards
+only missed calls to the ingress. The router sends those calls directly to
+the AI at all hours. The carrier controls the original ring time and which
+destinations are supported. Avoid dialling the public clinic number as a
+staff or fallback leg. The router uses a second PSTN leg to the native
+agent number, so verify caller ID, latency, and costs on the pilot route.
+
+An optional `override` object can use `"mode": "paused"` to route to the
+fallback, or `"mode": "cover_now"` for immediate AI. `cover_now` requires an
+`until` timestamp with an offset. A pause may also have an expiry. Pilot
+settings live in the service environment.
+
+Run the signed local tests, then place a direct ingress call. After that,
+call the clinic's regular line from a different phone and let it ring out.
+Confirm the call reaches the intended agent, the right workspace inbox
+receives the event, and the callback number survives both carrier legs.
+Test the fallback and revert the carrier rule using its documented
+procedure if the pilot path fails.
+
 Staff actions are append-only and tenant-scoped in `clinic_followup_actions`.
 The current state comes from the invoker-security `clinic_followup_states`
 view. Marking a booking request handled records staff follow-up, not a

@@ -20,6 +20,23 @@ app.use(express.json({
   }
 }));
 
+
+let voiceIngress = (_req, res) => res.sendStatus(503);
+if (process.env.VOICE_ROUTER_ROUTES) {
+  try {
+    voiceIngress = require("./voice-ingress").createVoiceIngress({
+      rawRoutes: process.env.VOICE_ROUTER_ROUTES,
+      publicUrl: process.env.VOICE_ROUTER_BASE_URL,
+      accountSid: process.env.TWILIO_VOICE_ACCOUNT_SID,
+      authToken: process.env.TWILIO_VOICE_AUTH_TOKEN
+    });
+  } catch {
+    console.error("Voice ingress configuration is invalid");
+  }
+}
+app.post(["/voice/inbound", "/voice/staff-result", "/voice/ai-result"],
+  express.urlencoded({ extended: false, limit: "16kb", parameterLimit: 100 }), voiceIngress);
+
 const VERIFY_TOKEN = "eden_verify_123";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
