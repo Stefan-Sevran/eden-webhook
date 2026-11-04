@@ -173,8 +173,11 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
         const email = {
           from: fromEmail,
           to: [row.notify_to],
-          subject: `Eden: ${row.kind.replaceAll(".", " ")} - ${row.clinic_id}`,
-          text: [
+          subject: row.account_id ? "New activity in your Eden Clinic Workspace" :
+            `Eden: ${row.kind.replaceAll(".", " ")} - ${row.clinic_id}`,
+          text: row.account_id
+            ? "There is new activity for your clinic. Sign in to view it: https://clinicnet.live/clinic/"
+            : [
             row.summary,
             `Clinic: ${row.clinic_id}`,
             `Channel: ${row.channel}`,
