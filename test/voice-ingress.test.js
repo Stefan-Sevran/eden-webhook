@@ -76,6 +76,19 @@ test("conditional forwarding goes straight to AI, including during business hour
   assert.ok(!forwarded.xml.includes(route.staffNumber));
 });
 
+test("a two-number route speaks the fallback message when the AI leg fails", async t => {
+  const fallbackMessage = "Our receptionist is unavailable. Please try again shortly.";
+  const api = await setup(t, { ...route, mode: "conditional_forwarding", clinicNumber: route.ingressNumber,
+    fallbackNumber: undefined, fallbackMessage });
+  assert.ok((await api.send()).xml.includes(route.aiNumber));
+  for (const state of ["busy", "no-answer", "failed"]) {
+    const backup = await api.send("/voice/ai-result", { ...form, DialCallStatus: state });
+    assert.equal(backup.status, 200);
+    assert.ok(backup.xml.includes(`<Say>${fallbackMessage}</Say><Hangup/>`));
+    assert.doesNotMatch(backup.xml, /<Dial/);
+  }
+});
+
 test("a pause uses the fallback; temporary AI coverage returns to staff after expiry", async t => {
   const paused = await setup(t, { ...route, override: { mode: "paused" } });
   assert.ok((await paused.send()).xml.includes(route.fallbackNumber));
@@ -104,5 +117,7 @@ test("configuration rejects forwarding loops and shared AI numbers", () => {
   const make = rows => createVoiceIngress({ rawRoutes: JSON.stringify(rows), publicUrl: origin, authToken, accountSid });
   assert.throws(() => make([{ ...route, staffNumber: route.clinicNumber }]), /unsafe dial destination/);
   assert.throws(() => make([{ ...route, fallbackNumber: route.ingressNumber }]), /unsafe dial destination/);
+  assert.throws(() => make([{ ...route, fallbackMessage: "Try again shortly." }]), /exactly one fallback/);
+  assert.throws(() => make([{ ...route, fallbackNumber: undefined, fallbackMessage: " " }]), /exactly one fallback/);
   assert.throws(() => make([route, { ...route, ingressNumber: "+12025550201" }]), /unsafe dial destination/);
 });
