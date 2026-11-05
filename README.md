@@ -154,7 +154,7 @@ Keep the verified ElevenLabs destination on its native Twilio integration.
 Use a separate, approved Twilio ingress number for the pilot. Set its incoming
 Voice webhook to POST `<VOICE_ROUTER_BASE_URL>/voice/inbound`. Use a
 provider-hosted TwiML fallback for ingress webhook failures, with a tested
-backup destination. The backup and staff lines must be direct destinations
+backup destination or message. The backup and staff lines must be direct destinations
 that cannot forward back to the clinic or the router.
 
 Server configuration:
@@ -181,6 +181,11 @@ Server configuration:
   }
 ]
 ```
+
+Each route requires one fallback. Set `fallbackNumber` to dial a backup line,
+or set `fallbackMessage` to speak a short message and end the call. A message
+lets the pilot run with just the ingress and AI numbers. It applies when the
+AI leg is busy, unanswered, or fails, and when the route is paused.
 
 With `managed` routing, staff ring first during configured open hours and
 the agent takes over on no answer, busy, or a failed staff leg. The agent

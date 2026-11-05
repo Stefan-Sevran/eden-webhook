@@ -43,9 +43,13 @@ function readRoutes(raw) {
   }
   const aiDestinations = new Set();
   for (const [number, row] of routes) {
-    const { mode, staffNumber, aiNumber, fallbackNumber, timeZone, override } = row;
+    const { mode, staffNumber, aiNumber, fallbackNumber, fallbackMessage, timeZone, override } = row;
+    if ((fallbackNumber === undefined) === (fallbackMessage === undefined) ||
+        (fallbackMessage !== undefined && (typeof fallbackMessage !== "string" || !fallbackMessage.trim()))) {
+      throw Error("Set exactly one fallback number or message");
+    }
     if (!["conditional_forwarding", "managed"].includes(mode) ||
-        [aiNumber, fallbackNumber, ...(mode === "managed" ? [staffNumber] : [])]
+        [aiNumber, ...(fallbackNumber === undefined ? [] : [fallbackNumber]), ...(mode === "managed" ? [staffNumber] : [])]
           .some(target => typeof target !== "string" || !E164.test(target) || incoming.has(target)) ||
         aiDestinations.has(aiNumber) || aiNumber === fallbackNumber || (mode === "managed" && aiNumber === staffNumber)) {
       throw Error("Invalid voice mode or unsafe dial destination");
@@ -72,7 +76,7 @@ function readRoutes(raw) {
         if (!Number.isFinite(until)) throw Error("Invalid voice override expiry");
       }
     }
-    routes.set(number, { mode, staffNumber, aiNumber, fallbackNumber, ringSeconds, clock, hours,
+    routes.set(number, { mode, staffNumber, aiNumber, fallbackNumber, fallbackMessage, ringSeconds, clock, hours,
       override: override?.mode, until });
   }
   return routes;
@@ -123,9 +127,10 @@ function createVoiceIngress({ rawRoutes, publicUrl, authToken, accountSid, now =
     } else if (next === "ai") {
       response.dial({ answerOnBridge: true, timeout: 20, method: "POST",
         action: origin.origin + AI_RESULT }, route.aiNumber);
-    } else if (next === "fallback") {
+    } else if (next === "fallback" && route.fallbackNumber) {
       response.dial({ answerOnBridge: true, timeout: 25 }, route.fallbackNumber);
     } else {
+      if (next === "fallback") response.say(route.fallbackMessage);
       response.hangup();
     }
     return res.type("text/xml").send(response.toString());
