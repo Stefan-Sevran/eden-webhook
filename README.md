@@ -147,6 +147,20 @@ Resend for durable email alerts; otherwise the call is visible in the inbox
 with notification state `not_configured`. This is not automated carrier
 forwarding setup, appointment confirmation, or SMS activation.
 
+### Clinic booking outcome pilot
+
+Apply `sql/clinic-booking-outcomes.sql` after the follow-up actions schema.
+Deploy the API before publishing the Clinic Workspace changes. To seed the
+fictional Cebu inquiry, an operator can call `POST /ops/demo-inquiry` with
+`Authorization: Bearer <OPS_API_KEY>` and the Test Location's `accountId`
+and `locationId`. Repeating the request returns the same event key.
+
+In Test Location, claim the sample in the Activity inbox, then mark it booked.
+It appears in Booked outcomes under the sample count. The sample contains no
+patient contact and sends no email. For real inquiries, staff use Mark booked
+after confirming an appointment. This is a staff-recorded outcome, separate
+from attendance, payment, and invoice reporting.
+
 
 ### Incoming voice router (opt-in pilot)
 

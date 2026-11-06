@@ -107,8 +107,9 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
 
   async function appendFollowup(token, userId, { accountId, locationId, eventKey, action }) {
     scopedPath("clinic_locations", accountId, { locationId });
-    if (!UUID.test(userId || "") || !/^[a-f0-9]{64}$/.test(eventKey || "") ||
-        !["handled", "reopened"].includes(action)) {
+    if (!UUID.test(userId || "") || !UUID.test(locationId || "") ||
+        !/^[a-f0-9]{64}$/.test(eventKey || "") ||
+        !["handled", "reopened", "claimed", "booked"].includes(action)) {
       const error = new Error("Invalid follow-up action");
       error.status = 400;
       throw error;

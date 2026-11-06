@@ -84,3 +84,24 @@ test("staff follow-up uses the authenticated actor and a scoped outcome", async 
   }), { status: 400 });
   assert.equal(calls.length, 1);
 });
+
+test("claim and booking actions require a location and use the staff actor", async () => {
+  const writes = [];
+  const api = createClinicTenantApi({
+    url: "https://project.supabase.co", publishableKey: "public-key",
+    fetchImpl: async (_url, options) => {
+      writes.push(JSON.parse(options.body));
+      return { ok: true, status: 201, json: async () => [] };
+    }
+  });
+  const eventKey = "a".repeat(64);
+  for (const action of ["claimed", "booked"]) {
+    await api.appendFollowup("user-token", userId, { accountId, locationId, eventKey, action });
+  }
+  await assert.rejects(api.appendFollowup("user-token", userId, {
+    accountId, eventKey, action: "claimed"
+  }), { status: 400 });
+  assert.deepEqual(writes.map(row => [row.action, row.actor_user_id]), [
+    ["claimed", userId], ["booked", userId]
+  ]);
+});

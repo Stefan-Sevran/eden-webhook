@@ -3253,6 +3253,20 @@ app.post("/ops/dispatch-notifications", requireOpsAccess, async (_req, res) => {
   }
 });
 
+app.post("/ops/demo-inquiry", requireOpsAccess, async (req, res) => {
+  if (!outcomeLedger.enabled) return res.sendStatus(503);
+  const { accountId, locationId } = req.body || {};
+  if (!isUuid(accountId) || !isUuid(locationId)) return res.sendStatus(400);
+  try {
+    const result = await outcomeLedger.recordDemoInquiry(accountId, locationId);
+    if (!result) return res.sendStatus(404);
+    return res.status(result.stored ? 201 : 200).json(result);
+  } catch (error) {
+    console.error("Demo inquiry could not be recorded:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
 async function requireClinicUser(req, res, next) {
   res.set("Cache-Control", "no-store");
   try {
