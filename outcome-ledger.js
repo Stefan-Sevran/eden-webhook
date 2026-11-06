@@ -174,6 +174,73 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return rows.length > 0;
   }
 
+  async function provisionMessengerConnection(pageId, { accountId, locationId }) {
+    const params = new URLSearchParams({
+      select: "id,status", account_id: `eq.${accountId}`, location_id: `eq.${locationId}`,
+      channel: "eq.facebook_messenger", status: "in.(requested,action_required)"
+    });
+    const rows = await database(`clinic_channel_connections?${params}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: "verifying", external_id: pageId, updated_at: new Date().toISOString() })
+    });
+    return rows[0] || await messengerLocation(pageId, { accountId, locationId });
+  }
+
+  async function messengerLocation(pageId, { accountId, locationId }) {
+    const params = new URLSearchParams({
+      select: "id,account_id,location_id,status", external_id: `eq.${pageId}`,
+      account_id: `eq.${accountId}`, location_id: `eq.${locationId}`,
+      channel: "eq.facebook_messenger", status: "in.(verifying,connected)", limit: "1"
+    });
+    const [route] = await database(`clinic_channel_connections?${params}`);
+    if (!route) return null;
+    const location = new URLSearchParams({
+      select: "alert_email", id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
+    });
+    const [row] = await database(`clinic_locations?${location}`);
+    return row ? { ...route, location: row } : null;
+  }
+
+  async function messengerCaseOpen(route, key) {
+    const params = new URLSearchParams({
+      select: "action", event_key: `eq.${key}`, account_id: `eq.${route.account_id}`,
+      location_id: `eq.${route.location_id}`, limit: "1"
+    });
+    const [row] = await database(`clinic_followup_states?${params}`);
+    return !["handled", "booked"].includes(row?.action);
+  }
+
+  async function messengerTurn(key) {
+    const [row] = await database(`clinic_messenger_turns?event_key=eq.${key}&limit=1`);
+    return row;
+  }
+
+  async function recentMessengerTurn(conversationKey) {
+    const params = new URLSearchParams({
+      conversation_key: `eq.${conversationKey}`,
+      order: "received_at.desc,updated_at.desc,event_key", limit: "1"
+    });
+    const [row] = await database(`clinic_messenger_turns?${params}`);
+    return row;
+  }
+
+  async function prepareMessengerTurn(turn) {
+    const [row] = await database("clinic_messenger_turns?on_conflict=event_key", {
+      method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify(turn)
+    });
+    return row || await messengerTurn(turn.event_key);
+  }
+
+  async function updateMessengerTurn(key, expected, state, caseKey) {
+    const rows = await database(`clinic_messenger_turns?event_key=eq.${key}&state=eq.${expected}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ state, updated_at: new Date().toISOString(),
+        ...(caseKey ? { case_key: caseKey } : {}) })
+    });
+    return rows.length > 0;
+  }
+
   async function dispatch(batchSize = 10) {
     if (!enabled || !resendKey || !fromEmail) {
       return { claimed: 0, sent: 0, failed: 0, reason: "email_not_configured" };
@@ -242,7 +309,9 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
   }
 
   return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
-    provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch };
+    provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
+    provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection,
+    messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
 
 module.exports = { outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger };

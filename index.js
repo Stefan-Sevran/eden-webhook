@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
+const { createClinicMessenger, parseClinicPages, pageNumber } = require("./clinic-messenger");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
@@ -55,6 +56,16 @@ const outcomeLedger = createOutcomeLedger({
   key: process.env.SUPABASE_SECRET_KEY,
   resendKey: process.env.RESEND_API_KEY,
   fromEmail: process.env.RESEND_FROM_EMAIL
+});
+let clinicMessengerPages = new Map();
+try {
+  clinicMessengerPages = parseClinicPages(process.env.CLINIC_MESSENGER_PAGES, META_PAGE_ID);
+} catch {
+  console.error("Clinic Messenger Page configuration is invalid");
+}
+const clinicMessenger = createClinicMessenger({
+  pages: clinicMessengerPages, appId: process.env.META_APP_ID,
+  ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY
 });
 const clinicTenantApi = createClinicTenantApi({
   url: process.env.SUPABASE_URL,
@@ -3200,7 +3211,10 @@ app.post("/webhook", async (req, res) => {
         });
       }
     }
-    const result = await messengerProcessor.processPayload(req.body);
+    const [result] = await Promise.all([
+      messengerProcessor.processPayload(req.body),
+      clinicMessenger.processPayload(req.body)
+    ]);
     console.log("Messenger webhook handled", result);
     return res.sendStatus(200);
   } catch (error) {
@@ -3215,6 +3229,23 @@ function requireOpsAccess(req, res, next) {
   if (!hasOpsAccess(req.get("authorization"), OPS_API_KEY)) return res.sendStatus(401);
   next();
 }
+
+app.post("/ops/messenger-connections", requireOpsAccess, async (req, res) => {
+  const { pageId } = req.body || {};
+  if (typeof pageId !== "string" || !pageNumber.test(pageId)) return res.sendStatus(400);
+  const page = clinicMessengerPages.get(pageId);
+  if (!page) return res.sendStatus(404);
+  if (!outcomeLedger.enabled) return res.sendStatus(503);
+  try {
+    if (!await clinicMessenger.verifyPage(pageId, page)) return res.sendStatus(409);
+    const connection = await outcomeLedger.provisionMessengerConnection(pageId, page);
+    if (!connection) return res.sendStatus(409);
+    return res.json({ status: connection.status });
+  } catch (error) {
+    console.error("Clinic Messenger verification failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
 
 app.get("/ops/outcomes", requireOpsAccess, async (req, res) => {
   try {

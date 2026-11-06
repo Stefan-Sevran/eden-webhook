@@ -1,6 +1,6 @@
 // A bounded, single-process idempotency guard for Meta's at-least-once delivery.
 // A shared durable inbox is needed before running more than one web instance.
-function createMessengerProcessor({ pageId, handleText, logger = console, now = Date.now }) {
+function createMessengerProcessor({ pageId, handleText, includeAttachments = false, logger = console, now = Date.now }) {
   const completed = new Map();
   const inFlight = new Map();
   const conversationQueues = new Map();
@@ -38,7 +38,10 @@ function createMessengerProcessor({ pageId, handleText, logger = console, now = 
         const senderId = event?.sender?.id;
         const messageId = event?.message?.mid;
         const text = event?.message?.text;
-        if (!senderId || !messageId || !text?.trim() || event.message.is_echo) {
+        const hasText = typeof text === "string" && text.trim();
+        const hasAttachment = includeAttachments && Array.isArray(event?.message?.attachments) &&
+          event.message.attachments.length > 0;
+        if (!senderId || !messageId || (!hasText && !hasAttachment) || event.message.is_echo) {
           ignored++;
           continue;
         }
@@ -57,7 +60,8 @@ function createMessengerProcessor({ pageId, handleText, logger = console, now = 
         const conversationKey = `${pageId}:${senderId}`;
         const previous = conversationQueues.get(conversationKey) || Promise.resolve();
         const task = previous.catch(() => {}).then(async () => {
-          await handleText({ pageId, senderId, text, messageId });
+          await handleText({ pageId, senderId, text: hasText ? text : "", messageId,
+            timestamp: event.timestamp, hasAttachment });
           completed.set(key, now());
           pruneCompleted();
         });

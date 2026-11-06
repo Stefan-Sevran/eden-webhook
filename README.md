@@ -231,3 +231,45 @@ Staff actions are append-only and tenant-scoped in `clinic_followup_actions`.
 The current state comes from the invoker-security `clinic_followup_states`
 view. Marking a booking request handled records staff follow-up, not a
 confirmed appointment or paid visit.
+
+### Clinic Messenger pilot
+
+The existing Eden Page continues to use its own reply flow. Clinic Pages use the
+same signed webhook with a separate, opt-in Page-to-location mapping.
+
+1. In Clinic Workspace, a location owner or admin requests **Facebook Messenger**.
+2. A person authorized to manage messages for the Facebook Page grants the Meta
+   app access and subscribes it to the Page's `messages` webhook field. Add the
+   Meta app ID as `META_APP_ID` and store the Page configuration below as the
+   Render secret `CLINIC_MESSENGER_PAGES`. Keep the Page token in Render.
+3. An operator calls `POST /ops/messenger-connections` using the existing
+   operations bearer credential with a JSON body of `{"pageId":"PAGE_ID"}`.
+   The backend checks the token's Page identity, the app's Page subscription,
+   and the workspace request. The connection moves to **Verifying**.
+4. From an authorized tester account, send one fictional private message to the
+   clinic Page. The connection moves to **Connected** after Meta accepts the
+   reply. Try a booking request and a human handoff and check both in the
+   location's **Needs attention** queue.
+
+The Render JSON value is keyed by Page ID:
+
+```json
+{
+  "1234567890": {
+    "accountId": "ACCOUNT_UUID",
+    "locationId": "LOCATION_UUID",
+    "pageToken": "PAGE_ACCESS_TOKEN",
+    "clinicName": "APPROVED_CLINIC_NAME",
+    "facts": "Approved services, hours, pricing and booking instructions."
+  }
+}
+```
+
+A booking request awaits staff confirmation. An open booking or staff handoff
+pauses automated replies on that conversation. Staff reply through the clinic's
+Page inbox and can mark the item handled or booked in Clinic Workspace. The
+pilot never retries an ambiguous outbound send. A staff item is created if the
+send failed or a retry finds an interrupted send. Attachments are handed to
+staff. Public comments and self-serve Facebook authorization are outside this
+pilot. Keep one Render instance during the pilot because ordering within a
+conversation is local to the instance.
