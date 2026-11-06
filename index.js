@@ -3346,6 +3346,30 @@ app.get("/clinic/inbox", requireClinicUser,
   clinicRoute(req => clinicTenantApi.request(req.clinicToken,
     clinicTenantApi.scopedPath("clinic_outcomes", req.query.accountId,
       { locationId: req.query.locationId, limit: req.query.limit }))));
+// Fixed internal destination. Membership is checked with the staff token
+// before the service-role ledger can write the pre-defined sample.
+app.post("/clinic/pilots/pearlsmile", requireClinicUser, clinicRoute(async req => {
+  const accountId = "76d85891-181d-4b99-a427-dd4dbc680e8a";
+  const locationId = "b865c71a-e9f1-4b09-acb5-0b5043ab4307";
+  const filter = new URLSearchParams({
+    select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`,
+    name: "eq.Test Location"
+  });
+  const locations = await clinicTenantApi.request(req.clinicToken, `clinic_locations?${filter}`);
+  if (!locations.length || !outcomeLedger.enabled) {
+    const error = new Error("PearlSmile pilot unavailable");
+    error.status = locations.length ? 503 : 403;
+    throw error;
+  }
+  const { stored } = await outcomeLedger.record({
+    event_key: outcomeKey("pearlsmile_web_chat_pilot_v1", accountId, locationId),
+    clinic_id: locationId, account_id: accountId, location_id: locationId,
+    channel: "website_chat", kind: "booking.requested", status: "AWAITING_CLINIC",
+    summary: "PearlSmile Cebu sample · Braces consultation",
+    details: { demo: true, service: "Braces consultation", requestedTime: "Asked about Saturday morning" }
+  });
+  return { stored };
+}));
 app.get("/clinic/followups", requireClinicUser,
   clinicRoute(req => clinicTenantApi.request(req.clinicToken,
     clinicTenantApi.scopedPath("clinic_followup_states", req.query.accountId,
