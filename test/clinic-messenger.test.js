@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHmac } = require("node:crypto");
 const { createClinicMessenger, parseClinicPages } = require("../clinic-messenger");
 
 const pageId = "1234567890", appId = "9876543210", sender = "5555512345";
@@ -44,7 +45,7 @@ function fixture() {
     }
   };
   const make = () => createClinicMessenger({
-    pages: new Map([[pageId, page]]), appId, ledger, openaiKey: "ai-key", now: () => clock.now,
+    pages: new Map([[pageId, page]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
     logger: { warn() {} },
     async recordOutcome(event) { if (!cases.has(event.event_key)) cases.set(event.event_key, event); },
     async fetchImpl(url, options) {
@@ -59,9 +60,13 @@ function fixture() {
         return Response.json({ choices: [{ message: { content: JSON.stringify(draft) } }] });
       }
       assert.equal(options.headers.Authorization, "Bearer page-key");
-      if (url.endsWith("me?fields=id")) return Response.json({ id: pageId });
-      if (url.endsWith("/subscribed_apps")) return Response.json({ data: [{ id: appId, subscribed_fields: ["messages"] }] });
-      assert.ok(url.endsWith(pageId + "/messages"));
+      const request = new URL(url);
+      assert.equal(request.searchParams.get("appsecret_proof"),
+        createHmac("sha256", "app-secret").update("page-key").digest("hex"));
+      assert.ok(!request.searchParams.has("access_token"));
+      if (request.pathname.endsWith("/me")) return Response.json({ id: pageId });
+      if (request.pathname.endsWith("/subscribed_apps")) return Response.json({ data: [{ id: appId, subscribed_fields: ["messages"] }] });
+      assert.ok(request.pathname.endsWith(pageId + "/messages"));
       sends.push(JSON.parse(options.body));
       return sendFails ? new Response(null, { status: 503 }) : Response.json({ message_id: "sent" });
     }
@@ -126,9 +131,9 @@ test("attachments hand off, and a rejected send is never retried after restart",
 
 test("Page verification identifies the failing check without exposing Meta error text", async () => {
   const make = failAt => createClinicMessenger({
-    pages: new Map(), appId,
+    pages: new Map(), appId, appSecret: "app-secret",
     async fetchImpl(url) {
-      const identity = url.endsWith("me?fields=id");
+      const identity = new URL(url).pathname.endsWith("/me");
       if (identity && failAt === "subscription") return Response.json({ id: pageId });
       return Response.json({ error: { code: 190, error_subcode: 463, message: "do not log this" } }, { status: 400 });
     }

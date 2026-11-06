@@ -1,3 +1,4 @@
+const { createHmac } = require("node:crypto");
 const { createMessengerProcessor } = require("./messenger-events");
 const { outcomeKey } = require("./outcome-ledger");
 const { isUuid } = require("./clinic-tenant");
@@ -21,16 +22,19 @@ function parseClinicPages(raw, edenPageId) {
         typeof page.facts !== "string" || !page.facts.trim() || page.facts.length > 6000) {
       throw Error("Invalid clinic Messenger Page configuration");
     }
-    return [pageId, page];
+    return [pageId, { ...page, pageToken: page.pageToken.trim() }];
   }));
 }
 
-function createClinicMessenger({ pages, appId, ledger, recordOutcome, openaiKey,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
 
   async function graph(path, page, body) {
-    const response = await fetchImpl("https://graph.facebook.com/v25.0/" + path, {
+    if (!appSecret) throw Error("META_APP_SECRET is missing");
+    const url = new URL("https://graph.facebook.com/v25.0/" + path);
+    url.searchParams.set("appsecret_proof", createHmac("sha256", appSecret).update(page.pageToken).digest("hex"));
+    const response = await fetchImpl(url.toString(), {
       method: body ? "POST" : "GET",
       headers: { Authorization: "Bearer " + page.pageToken, "Content-Type": "application/json" },
       ...(body ? { body: JSON.stringify(body) } : {}),
