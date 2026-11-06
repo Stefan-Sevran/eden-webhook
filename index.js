@@ -64,7 +64,7 @@ try {
   console.error("Clinic Messenger Page configuration is invalid");
 }
 const clinicMessenger = createClinicMessenger({
-  pages: clinicMessengerPages, appId: process.env.META_APP_ID,
+  pages: clinicMessengerPages, appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY
 });
 const clinicTenantApi = createClinicTenantApi({
