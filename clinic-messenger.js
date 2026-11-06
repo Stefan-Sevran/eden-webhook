@@ -36,17 +36,24 @@ function createClinicMessenger({ pages, appId, ledger, recordOutcome, openaiKey,
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(8000)
     });
-    if (!response.ok) throw Error("Meta request failed: HTTP " + response.status);
-    const data = await response.json();
-    if (data.error) throw Error("Meta request returned an error");
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data || data.error) {
+      const code = Number.isInteger(data?.error?.code) ? data.error.code : "unknown";
+      const subcode = Number.isInteger(data?.error?.error_subcode) ? data.error.error_subcode : "none";
+      throw Error(`Meta request failed: HTTP ${response.status}, code ${code}, subcode ${subcode}`);
+    }
     return data;
   }
 
   async function verifyPage(pageId, page) {
     if (!pageNumber.test(appId || "")) throw Error("META_APP_ID is missing");
-    const identity = await graph("me?fields=id", page);
+    const identity = await graph("me?fields=id", page).catch(error => {
+      throw Error("Page token identity check: " + error.message);
+    });
     if (String(identity.id) !== pageId) return false;
-    const subscriptions = await graph(pageId + "/subscribed_apps", page);
+    const subscriptions = await graph(pageId + "/subscribed_apps", page).catch(error => {
+      throw Error("Page webhook subscription check: " + error.message);
+    });
     return subscriptions.data?.some(app =>
       String(app.id) === appId && app.subscribed_fields?.includes("messages")) === true;
   }

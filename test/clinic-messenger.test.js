@@ -123,3 +123,20 @@ test("attachments hand off, and a rejected send is never retried after restart",
   assert.equal(f.cases.size, 2);
   assert.equal([...f.turns.values()].at(-1).state, "needs_review");
 });
+
+test("Page verification identifies the failing check without exposing Meta error text", async () => {
+  const make = failAt => createClinicMessenger({
+    pages: new Map(), appId,
+    async fetchImpl(url) {
+      const identity = url.endsWith("me?fields=id");
+      if (identity && failAt === "subscription") return Response.json({ id: pageId });
+      return Response.json({ error: { code: 190, error_subcode: 463, message: "do not log this" } }, { status: 400 });
+    }
+  });
+  await assert.rejects(make("identity").verifyPage(pageId, page), {
+    message: "Page token identity check: Meta request failed: HTTP 400, code 190, subcode 463"
+  });
+  await assert.rejects(make("subscription").verifyPage(pageId, page), {
+    message: "Page webhook subscription check: Meta request failed: HTTP 400, code 190, subcode 463"
+  });
+});
