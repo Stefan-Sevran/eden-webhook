@@ -108,6 +108,23 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return connections.length ? locations[0] : null;
   }
 
+  async function recordDemoInquiry(accountId, locationId) {
+    const params = new URLSearchParams({
+      select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`,
+      name: "eq.Test Location", limit: "1"
+    });
+    if (!(await database(`clinic_locations?${params}`)).length) return null;
+    const eventKey = outcomeKey("demo_braces_callback_v1", accountId, locationId);
+    const { stored } = await record({
+      event_key: eventKey, clinic_id: locationId, account_id: accountId, location_id: locationId,
+      channel: "ai_phone", kind: "call.followup_needed", status: "NEEDS_CALLBACK",
+      summary: "Sample inquiry · Braces consultation in Cebu",
+      details: { demo: true, service: "Braces consultation",
+        requestedTime: "Asked about Saturday availability" }
+    });
+    return { eventKey, stored };
+  }
+
   async function provisionVoiceConnection(accountId, locationId, agentId, number) {
     if (!enabled) throw new Error("Outcome ledger is not configured");
     const locationParams = new URLSearchParams({
@@ -224,7 +241,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return { claimed: rows.length, sent, failed };
   }
 
-  return { enabled, record, list, listBookings, connectedLocation,
+  return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch };
 }
 
