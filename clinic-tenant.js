@@ -56,7 +56,7 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     } else if (table === "clinic_channel_connections") {
       params.set("select", "id,account_id,location_id,channel,status,external_id,forwarding_number,updated_at");
     } else if (table === "clinic_followup_states") {
-      params.set("select", "event_key,account_id,location_id,action,actor_user_id,created_at");
+      params.set("select", "event_key,account_id,location_id,action,actor_user_id,created_at,appointment_at");
     }
     return `${table}?${params}`;
   }
@@ -105,11 +105,16 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     });
   }
 
-  async function appendFollowup(token, userId, { accountId, locationId, eventKey, action }) {
+  async function appendFollowup(token, userId, { accountId, locationId, eventKey, action, appointmentAt }) {
     scopedPath("clinic_locations", accountId, { locationId });
     if (!UUID.test(userId || "") || !UUID.test(locationId || "") ||
         !/^[a-f0-9]{64}$/.test(eventKey || "") ||
-        !["handled", "reopened", "claimed", "booked"].includes(action)) {
+        !["handled", "reopened", "claimed", "booked"].includes(action) ||
+        (appointmentAt !== undefined && (action !== "booked" ||
+          typeof appointmentAt !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(appointmentAt) ||
+          !Number.isFinite(Date.parse(appointmentAt)) ||
+          new Date(appointmentAt).toISOString() !== appointmentAt))) {
       const error = new Error("Invalid follow-up action");
       error.status = 400;
       throw error;
@@ -117,7 +122,8 @@ function createClinicTenantApi({ url, publishableKey, fetchImpl = fetch }) {
     return request(token, "clinic_followup_actions", {
       method: "POST", prefer: "return=representation",
       body: { account_id: accountId, location_id: locationId,
-        event_key: eventKey, actor_user_id: userId, action }
+        event_key: eventKey, actor_user_id: userId, action,
+        ...(appointmentAt === undefined ? {} : { appointment_at: appointmentAt }) }
     });
   }
 
