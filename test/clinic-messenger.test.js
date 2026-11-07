@@ -16,7 +16,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture() {
+function fixture(pageConfig = page) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
@@ -45,7 +45,7 @@ function fixture() {
     }
   };
   const make = () => createClinicMessenger({
-    pages: new Map([[pageId, page]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
+    pages: new Map([[pageId, pageConfig]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
     logger: { warn() {} },
     async recordOutcome(event) { if (!cases.has(event.event_key)) cases.set(event.event_key, event); },
     async fetchImpl(url, options) {
@@ -80,6 +80,25 @@ test("clinic Page config cannot replace Eden's Page or point to an invalid tenan
   assert.equal(parseClinicPages(undefined, pageId).size, 0);
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: page }), pageId));
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: { ...page, locationId: "other" } }), "999999"));
+});
+
+test("only an opted-in Page gets dental education, separate from its approved clinic facts", async () => {
+  const message = payload("dental-faq", "What is root canal treatment?");
+  const defaultPage = fixture();
+  await defaultPage.make().processPayload(message);
+  assert.doesNotMatch(defaultPage.modelInputs[0].messages[0].content, /General dental FAQ:/);
+
+  const configuredPages = parseClinicPages(JSON.stringify({ [pageId]: { ...page, dentalFaq: true } }), "999999");
+  const dentalPage = fixture(configuredPages.get(pageId));
+  await dentalPage.make().processPayload(message);
+  const prompt = dentalPage.modelInputs[0].messages[0].content;
+  assert.match(prompt, /Approved clinic facts:\nOpen 9–5\.\n\nGeneral dental FAQ:/);
+  assert.match(prompt, /approved clinic facts as the only source for clinic-specific claims/);
+  assert.match(prompt, /Use handoff for personal suitability/);
+  assert.match(prompt, /direct the person to local emergency services immediately/);
+  for (const topic of ["Dental checkup", "Fillings", "Root canal", "Tooth extraction", "Dental implants", "Clear aligners", "Teeth whitening"]) {
+    assert.ok(prompt.includes(`\n- ${topic}`), `Missing FAQ topic: ${topic}`);
+  }
 });
 
 test("only a verified binding receives replies and a conversation creates one booking request", async () => {

@@ -39,7 +39,8 @@ function parseMessengerPilots(raw, reservedPageIds) {
       throw Error("Expected a public Facebook Page URL");
     }
     pages.add(candidate.pageId);
-    locations.set(locationId, { accountId, locationId, pageId, clinicName, facts, pageUrl: pageUrl?.href });
+    locations.set(locationId, { accountId, locationId, pageId, clinicName, facts, pageUrl: pageUrl?.href,
+      dentalFaq: candidate.dentalFaq === true });
   }
   return locations;
 }
