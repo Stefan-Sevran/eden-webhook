@@ -154,8 +154,9 @@ ${page.facts}` },
         draft, case_key: draft.intent === "answer" ? null : outcomeKey("clinic_messenger_case", eventKey)
       });
     }
+    const canActivate = route.status === "verifying" && Boolean(turn.case_key);
     if (turn.state === "sent") {
-      if (route.status === "verifying") await ledger.activateMessengerConnection(route);
+      if (canActivate) await ledger.activateMessengerConnection(route);
       return;
     }
 
@@ -201,7 +202,7 @@ ${page.facts}` },
     }
 
     await ledger.updateMessengerTurn(eventKey, "sending", "sent");
-    if (route.status === "verifying") await ledger.activateMessengerConnection(route);
+    if (canActivate) await ledger.activateMessengerConnection(route);
   }
 
   function registerPage(pageId, page) {
