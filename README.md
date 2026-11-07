@@ -282,10 +282,16 @@ Graph ID, in `PAGE_ID_POST_ID` format. Enable the Page `feed` webhook for this
 pilot Page alongside `messages`. Begin with a fresh top-level test comment
 from a separate Facebook account. Leave the setting empty to disable intake.
 
-The clinic workspace's Activity inbox shows short review drafts. Staff open
-the original comment, edit the wording if needed, and publish in Facebook.
-Keep the draft's tracking code in the posted reply for attribution. Eden does
-not store the original comment or comment author and has no public send step.
+The clinic workspace's Activity inbox shows short review drafts. Staff can
+open the original comment and post in Facebook. To allow clinic owners and
+admins to review the original, edit the draft, and publish from the workspace,
+add `"publish":true` to `CLINIC_COMMENT_PILOT`. Confirm that the connected Page
+token can read the comment and publish replies with `pages_manage_engagement`
+in a controlled test. Keep the tracking code in the posted reply for attribution.
+Eden does not store the original comment or comment author. Eden claims each
+draft once before publishing and records the reviewer and approved reply.
+If the publish result is uncertain, inspect the thread in Facebook before
+replying again. The workspace does not retry an uncertain publish.
 
 The pilot counts tagged Messenger conversations, booking requests, and
 appointments staff mark booked in the latest 100 location inbox items. A

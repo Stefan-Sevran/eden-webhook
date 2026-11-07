@@ -73,6 +73,8 @@ try {
 }
 const commentPilot = createCommentPilot({ config: commentPilotConfig, ledger: outcomeLedger,
   recordOutcome: recordClinicOutcome,
+  isAdmin: (req, accountId) => messengerConnect.isAdmin(req, accountId),
+  commentGraph: (...args) => clinicMessenger.commentGraph(...args),
   getPage: pageId => {
     const browserPage = messengerConnect.enabled && [...messengerPilots.values()].find(page => page.pageId === pageId);
     return browserPage || clinicMessengerPages.get(pageId);
@@ -3368,6 +3370,7 @@ app.get("/clinic/public-config", (_req, res) => {
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
     publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
     messengerSetupAvailable: messengerConnect.enabled && messengerPilots.size > 0,
+    commentPilotPublishAvailable: commentPilotConfig?.publish === true,
     messengerConnect: messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID ? {
       accountId: messengerConnectPilot.accountId, locationId: messengerConnectPilot.locationId
     } : null,
@@ -3395,6 +3398,8 @@ app.post("/clinic/connections", requireClinicUser,
 app.get("/clinic/messenger/setups", requireClinicUser, clinicRoute(messengerConnect.setups));
 app.post("/clinic/messenger/start", requireClinicUser, clinicRoute(messengerConnect.start));
 app.post("/clinic/messenger/finish", requireClinicUser, clinicRoute(messengerConnect.finish));
+app.get("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.review));
+app.post("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.publish));
 
 // An operator assigns a dedicated ElevenLabs agent and forwarding destination
 // to an existing clinic request. The first signed inbound test call activates it.

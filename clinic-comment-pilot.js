@@ -1,4 +1,5 @@
 const { outcomeKey } = require("./outcome-ledger");
+const { isUuid } = require("./clinic-tenant");
 
 const day = 24 * 60 * 60 * 1000;
 const number = /^\d{5,30}$/;
@@ -13,7 +14,11 @@ function parseCommentPilot(raw) {
       !config.postId.startsWith(config.pageId + "_")) {
     throw Error("Expected one Page ID and its full Page post ID");
   }
-  return { pageId: config.pageId, postId: config.postId };
+  return { pageId: config.pageId, postId: config.postId, ...(config.publish === true ? { publish: true } : {}) };
+}
+
+function reviewError(status, message) {
+  return Object.assign(new Error(message), { status });
 }
 
 function publicDraft(text, code) {
@@ -28,7 +33,7 @@ function publicDraft(text, code) {
   return `Thanks for reaching out! Tap Message on our Page and include ${code} so ${action}.`;
 }
 
-function createCommentPilot({ config, getPage, ledger, recordOutcome, now = Date.now }) {
+function createCommentPilot({ config, getPage, ledger, recordOutcome, isAdmin, commentGraph, now = Date.now }) {
   async function processPayload(payload) {
     if (!config || payload?.object !== "page" || !Array.isArray(payload.entry)) return;
     const { pageId, postId } = config;
@@ -94,7 +99,72 @@ function createCommentPilot({ config, getPage, ledger, recordOutcome, now = Date
     });
   }
 
-  return { processPayload, messageContext, recordStarted };
+  async function reviewTarget(req, input) {
+    if (!config?.publish) throw reviewError(403, "Comment publishing is disabled");
+    const { accountId, locationId, eventKey } = input || {};
+    if (!isUuid(accountId) || !isUuid(locationId) || !/^[a-f0-9]{64}$/.test(eventKey || "")) {
+      throw reviewError(400, "Invalid comment review request");
+    }
+    const page = getPage(config.pageId);
+    if (page?.accountId !== accountId || page.locationId !== locationId || !await isAdmin(req, accountId)) {
+      throw reviewError(403, "Comment publishing requires an administrator for the pilot location");
+    }
+    const route = await ledger.messengerLocation(config.pageId, page);
+    if (route?.status !== "connected") throw reviewError(409, "The pilot Page is disconnected");
+    const draft = await ledger.commentDraftForReview(route, config.postId, eventKey);
+    if (!draft || draft.details?.pageId !== config.pageId || !objectId.test(draft.details?.commentId || "")) {
+      throw reviewError(404, "Comment draft not found");
+    }
+    if (draft.status !== "staff_review") throw reviewError(409, "The comment draft has already been processed");
+    return { route, page, draft, commentId: draft.details.commentId };
+  }
+
+  async function loadOriginal({ page, route, commentId }) {
+    const original = await commentGraph(config.pageId, page, route, commentId);
+    if (String(original.id) !== commentId || original.is_hidden === true ||
+        typeof original.message !== "string" || !original.message.trim()) {
+      throw reviewError(409, "The Facebook comment is unavailable for review");
+    }
+    return { message: original.message, version: outcomeKey("comment_review", commentId, original.message) };
+  }
+
+  async function review(req) {
+    return loadOriginal(await reviewTarget(req, req.query));
+  }
+
+  async function publish(req) {
+    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+    if (!message || message.length > 500 || !/^[a-f0-9]{64}$/.test(req.body?.version || "")) {
+      throw reviewError(400, "A reviewed reply of 1 to 500 characters is required");
+    }
+    const target = await reviewTarget(req, req.body);
+    const { route, page, draft, commentId } = target;
+    if ((await loadOriginal(target)).version !== req.body.version) {
+      throw reviewError(409, "The Facebook comment changed during review");
+    }
+    const transition = (expected, status, details) =>
+      ledger.transitionCommentDraft(route, config.postId, draft.event_key, expected, status, details);
+    const details = { ...draft.details, approvedReply: message, approvedBy: req.clinicUserId,
+      approvedAt: new Date(now()).toISOString() };
+    if (!await transition("staff_review", "publishing", details)) {
+      throw reviewError(409, "Another reviewer already handled this comment");
+    }
+
+    let publishedId;
+    try {
+      const result = await commentGraph(config.pageId, page, route, commentId, message);
+      if (objectId.test(result.id || "")) publishedId = result.id;
+    } catch {
+      // A timeout or lost response may follow a successful send. Never retry here.
+    }
+    const status = publishedId ? "published" : "publish_unverified";
+    if (!await transition("publishing", status, { ...details, ...(publishedId ? { publishedId } : {}) })) {
+      throw reviewError(409, "Check the comment on Facebook before taking further action");
+    }
+    return { status };
+  }
+
+  return { processPayload, messageContext, recordStarted, review, publish };
 }
 
 module.exports = { createCommentPilot, parseCommentPilot };

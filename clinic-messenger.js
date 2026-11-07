@@ -32,7 +32,7 @@ function metaErrorHint(message) {
   // Map Meta's error text to fixed labels so responses cannot leak into logs.
   if (lower.includes("invalid appsecret_proof")) return "app secret proof rejected";
   if (lower.includes("require an appsecret_proof")) return "app secret proof required";
-  for (const permission of ["pages_manage_metadata", "pages_read_engagement", "pages_messaging"]) {
+  for (const permission of ["pages_manage_metadata", "pages_read_engagement", "pages_messaging", "pages_manage_engagement"]) {
     if (lower.includes(permission)) return `check ${permission} permission`;
   }
   if (lower.includes("unsupported get request")) return "unsupported Page read";
@@ -67,6 +67,13 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
   async function getPageToken(pageId, userToken) {
     const identity = await graph(pageId + "?fields=id,access_token", { pageToken: userToken });
     return String(identity.id) === pageId ? identity.access_token : null;
+  }
+
+  async function commentGraph(pageId, page, route, commentId, message) {
+    const pageToken = await getStoredPageToken?.(pageId, route) || page.pageToken;
+    if (!pageToken) throw Object.assign(new Error("The Facebook Page must be reconnected"), { status: 409 });
+    const path = message ? `${commentId}/comments` : `${commentId}?fields=id,message,is_hidden`;
+    return graph(path, { pageToken }, message ? { message } : undefined);
   }
 
   async function verifyPage(pageId, page, { subscribe = false } = {}) {
@@ -237,7 +244,7 @@ ${page.facts}` },
     if (results.some(result => result.status === "rejected")) throw Error("Clinic Messenger processing failed");
   }
 
-  return { processPayload, verifyPage, getPageToken, registerPage };
+  return { processPayload, verifyPage, getPageToken, registerPage, commentGraph };
 }
 
 module.exports = { createClinicMessenger, parseClinicPages, pageNumber };

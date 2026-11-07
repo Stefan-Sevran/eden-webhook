@@ -227,13 +227,33 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return !["handled", "booked"].includes(row?.action);
   }
 
-  async function commentDraft(route, postId, code, since) {
+  function commentDraftPath(route, postId, filters) {
     const params = new URLSearchParams({
-      select: "event_key", account_id: `eq.${route.account_id}`, location_id: `eq.${route.location_id}`,
-      channel: "eq.facebook_comment", kind: "eq.comment.draft", occurred_at: `gte.${since}`,
-      "details->>commentPilotPostId": `eq.${postId}`, "details->>commentPilotCode": `eq.${code}`, limit: "1"
+      account_id: `eq.${route.account_id}`, location_id: `eq.${route.location_id}`,
+      channel: "eq.facebook_comment", kind: "eq.comment.draft",
+      "details->>commentPilotPostId": `eq.${postId}`, ...filters
     });
-    const [row] = await database(`clinic_outcomes?${params}`);
+    return `clinic_outcomes?${params}`;
+  }
+
+  async function commentDraft(route, postId, code, since) {
+    const [row] = await database(commentDraftPath(route, postId, {
+      select: "event_key", occurred_at: `gte.${since}`, "details->>commentPilotCode": `eq.${code}`, limit: "1"
+    }));
+    return Boolean(row);
+  }
+
+  async function commentDraftForReview(route, postId, eventKey) {
+    const [row] = await database(commentDraftPath(route, postId, {
+      select: "event_key,status,details", event_key: `eq.${eventKey}`, limit: "1"
+    }));
+    return row;
+  }
+
+  async function transitionCommentDraft(route, postId, eventKey, expected, status, details) {
+    const path = commentDraftPath(route, postId, { select: "event_key", event_key: `eq.${eventKey}`, status: `eq.${expected}` });
+    const [row] = await database(path, { method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status, details }) });
     return Boolean(row);
   }
 
@@ -338,6 +358,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
   return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
+    commentDraftForReview, transitionCommentDraft,
     saveMessengerCredential, messengerCredential,
     messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
