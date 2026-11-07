@@ -1,8 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createMessengerConnect, messengerConnectPilot: pilot } = require("../clinic-messenger-connect");
+const { createMessengerConnect, parseMessengerPilots, messengerConnectPilot: pilot } = require("../clinic-messenger-connect");
 
-function fixture() {
+function fixture(target = pilot, pilots) {
   let clock = Date.parse("2026-11-07T07:00:00Z");
   let role = "admin";
   let stored;
@@ -10,12 +10,12 @@ function fixture() {
   const pageToken = "meta_page_credential_for_testing";
   const app = createMessengerConnect({
     appId: "980837197825196", appSecret: "test-secret", configId: "1234567", encryptionKey: "ab".repeat(32),
-    now: () => clock,
+    now: () => clock, pilots,
     clinicTenantApi: { enabled: true, request: async () => [{ role }] },
     ledger: {
       enabled: true,
-      async saveMessengerCredential(target, encrypted) {
-        assert.equal(target, pilot);
+      async saveMessengerCredential(savedTarget, encrypted) {
+        assert.equal(savedTarget.locationId, target.locationId);
         assert.ok(!encrypted.includes(pageToken));
         stored = encrypted;
         return "verifying";
@@ -24,12 +24,12 @@ function fixture() {
     },
     messenger: {
       async getPageToken(page, token) {
-        assert.equal(page, pilot.pageId);
+        assert.equal(page, target.pageId);
         assert.equal(token, "long_lived_user_token_for_testing");
         return pageToken;
       },
       async verifyPage(page, credentials, options) {
-        assert.equal(page, pilot.pageId);
+        assert.equal(page, target.pageId);
         assert.equal(credentials.pageToken, pageToken);
         assert.equal(options.subscribe, true);
         return true;
@@ -64,6 +64,32 @@ test("connects Glow with a server-side code exchange and stores a scoped encrypt
   const route = { id: "test-route", account_id: pilot.accountId, location_id: pilot.locationId };
   assert.equal(await app.pageToken(pilot.pageId, route), pageToken);
   assert.equal(await app.pageToken(pilot.pageId, { ...route, location_id: "other" }), null);
+});
+
+test("the second workspace gets its own Page, and an OAuth return cannot switch clinics", async () => {
+  const second = {
+    accountId: "4aed5565-40a1-4b31-8d86-0c6c28f108d4",
+    locationId: "296b09f3-5828-48df-9809-3263ac3f6de3",
+    pageId: "1234567890", clinicName: "Second test Page", facts: "Staff confirm appointments."
+  };
+  const pilots = parseMessengerPilots(JSON.stringify([second]), ["1086617101195136"]);
+  assert.throws(() => parseMessengerPilots(JSON.stringify([{ ...second, pageId: pilot.pageId }]), []), /duplicate/);
+  const { app, exchanges, pageToken, setRole } = fixture(second, pilots);
+  const secondReq = { ...req, body: { accountId: second.accountId, locationId: second.locationId } };
+  assert.deepEqual((await app.setups({ ...req, query: { accountId: second.accountId } })).map(row => row.locationId),
+    [second.locationId]);
+  setRole("staff");
+  assert.deepEqual(await app.setups({ ...req, query: { accountId: second.accountId } }), []);
+  setRole("admin");
+  const { state } = await app.start(secondReq);
+  await assert.rejects(app.finish({ ...req, body: { ...req.body, state, code: "test-code" } }), { status: 400 });
+  assert.equal(exchanges.length, 0);
+  await app.finish({ ...secondReq, body: { ...secondReq.body, state, code: "test-code" } });
+  const route = { id: "second-route", account_id: second.accountId, location_id: second.locationId };
+  assert.equal(await app.pageToken(second.pageId, route), pageToken);
+  assert.equal(await app.pageToken(pilot.pageId, route), null);
+  await assert.rejects(app.pageToken(pilot.pageId, { ...route, account_id: pilot.accountId, location_id: pilot.locationId }),
+    /authenticate/i);
 });
 
 test("rejects a foreign location, ordinary staff, and invalid or expired authorization before exchanging a code", async () => {

@@ -89,10 +89,11 @@ test("only a verified binding receives replies and a conversation creates one bo
   await messenger.processPayload(payload("foreign", "Hi", timestamp, "12349999"));
   assert.equal(f.sends.length, 0);
   await messenger.processPayload(payload("hello", "I want braces"));
-  assert.equal(f.route.status, "connected");
+  assert.equal(f.route.status, "verifying");
   const second = payload("booking", "Saturday please", timestamp + 500);
   await Promise.all([messenger.processPayload(second), messenger.processPayload(second)]);
   await f.make().processPayload(second);
+  assert.equal(f.route.status, "connected");
   assert.equal(f.sends.length, 2);
   assert.equal(f.modelInputs.length, 2);
   assert.equal(f.sends[1].messaging_type, "RESPONSE");

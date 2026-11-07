@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { createClinicMessenger, parseClinicPages, pageNumber } = require("./clinic-messenger");
-const { createMessengerConnect, messengerConnectPilot } = require("./clinic-messenger-connect");
+const { createMessengerConnect, parseMessengerPilots, messengerConnectPilot } = require("./clinic-messenger-connect");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
@@ -73,14 +73,25 @@ const clinicTenantApi = createClinicTenantApi({
   url: process.env.SUPABASE_URL,
   publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY
 });
+const reservedMessengerPages = [META_PAGE_ID, ...[...clinicMessengerPages.keys()]
+  .filter(pageId => pageId !== messengerConnectPilot.pageId)];
+let messengerPilots = new Map();
+try {
+  messengerPilots = parseMessengerPilots(process.env.CLINIC_MESSENGER_PILOT_LOCATIONS, reservedMessengerPages);
+} catch {
+  console.error("Additional Messenger pilot locations are invalid");
+  if (messengerConnectPilot.pageId !== META_PAGE_ID) {
+    messengerPilots.set(messengerConnectPilot.locationId, messengerConnectPilot);
+  }
+}
 const messengerConnect = createMessengerConnect({
   appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   configId: process.env.META_MESSENGER_LOGIN_CONFIG_ID,
   encryptionKey: process.env.CLINIC_MESSENGER_TOKEN_KEY,
-  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger
+  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots
 });
-if (messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID) {
-  clinicMessenger.registerPage(messengerConnectPilot.pageId, messengerConnectPilot);
+if (messengerConnect.enabled) {
+  for (const target of messengerPilots.values()) clinicMessenger.registerPage(target.pageId, target);
 }
 
 async function recordClinicOutcome(event) {
@@ -3341,6 +3352,7 @@ app.get("/clinic/public-config", (_req, res) => {
   res.json({
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
     publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
+    messengerSetupAvailable: messengerConnect.enabled && messengerPilots.size > 0,
     messengerConnect: messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID ? {
       accountId: messengerConnectPilot.accountId, locationId: messengerConnectPilot.locationId
     } : null,
@@ -3365,6 +3377,7 @@ app.get("/clinic/connections", requireClinicUser,
       { locationId: req.query.locationId }))));
 app.post("/clinic/connections", requireClinicUser,
   clinicRoute(req => clinicTenantApi.requestConnection(req.clinicToken, req.body || {})));
+app.get("/clinic/messenger/setups", requireClinicUser, clinicRoute(messengerConnect.setups));
 app.post("/clinic/messenger/start", requireClinicUser, clinicRoute(messengerConnect.start));
 app.post("/clinic/messenger/finish", requireClinicUser, clinicRoute(messengerConnect.finish));
 
