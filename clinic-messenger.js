@@ -39,7 +39,7 @@ function metaErrorHint(message) {
   return "";
 }
 
-function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
 
@@ -51,6 +51,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
       method: body ? "POST" : "GET",
       headers: { Authorization: "Bearer " + page.pageToken, "Content-Type": "application/json" },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      redirect: "error",
       signal: AbortSignal.timeout(8000)
     });
     const data = await response.json().catch(() => null);
@@ -63,17 +64,29 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return data;
   }
 
-  async function verifyPage(pageId, page) {
+  async function getPageToken(pageId, userToken) {
+    const identity = await graph(pageId + "?fields=id,access_token", { pageToken: userToken });
+    return String(identity.id) === pageId ? identity.access_token : null;
+  }
+
+  async function verifyPage(pageId, page, { subscribe = false } = {}) {
     if (!pageNumber.test(appId || "")) throw Error("META_APP_ID is missing");
     const identity = await graph("me?fields=id", page).catch(error => {
       throw Error("Page token identity check: " + error.message);
     });
     if (String(identity.id) !== pageId) return false;
-    const subscriptions = await graph(pageId + "/subscribed_apps", page).catch(error => {
-      throw Error("Page webhook subscription check: " + error.message);
-    });
-    return subscriptions.data?.some(app =>
-      String(app.id) === appId && app.subscribed_fields?.includes("messages")) === true;
+    const readSubscription = async () => {
+      const subscriptions = await graph(pageId + "/subscribed_apps", page).catch(error => {
+        throw Error("Page webhook subscription check: " + error.message);
+      });
+      if (!Array.isArray(subscriptions.data)) throw Error("Unexpected Page webhook subscription result");
+      return subscriptions.data.find(app => String(app.id) === appId)?.subscribed_fields || [];
+    };
+    const fields = await readSubscription();
+    if (fields.includes("messages")) return true;
+    if (!subscribe) return false;
+    await graph(pageId + "/subscribed_apps", page, { subscribed_fields: [...fields, "messages"].join(",") });
+    return (await readSubscription()).includes("messages");
   }
 
   async function draftReply(page, previous, text) {
@@ -123,6 +136,8 @@ ${page.facts}` },
         received <= now() - day || received > now() + 60000) return;
     const route = await ledger.messengerLocation(pageId, page);
     if (!route) return;
+    const pageToken = (await getStoredPageToken?.(pageId, route)) || page.pageToken;
+    if (!pageToken) return;
 
     const conversationKey = outcomeKey("clinic_messenger_thread", route.account_id, route.location_id, pageId, senderId);
     const eventKey = outcomeKey("clinic_messenger_turn", conversationKey, messageId);
@@ -172,7 +187,7 @@ ${page.facts}` },
     }
 
     try {
-      const send = await graph(pageId + "/messages", page, {
+      const send = await graph(pageId + "/messages", { pageToken }, {
         recipient: { id: senderId }, messaging_type: "RESPONSE",
         message: { text: turn.draft.reply }
       });
@@ -189,11 +204,12 @@ ${page.facts}` },
     if (route.status === "verifying") await ledger.activateMessengerConnection(route);
   }
 
-  for (const [pageId, page] of pages) {
+  function registerPage(pageId, page) {
     processors.set(pageId, createMessengerProcessor({
       pageId, now, logger, includeAttachments: true, handleText: event => handleText(page, event)
     }));
   }
+  for (const [pageId, page] of pages) registerPage(pageId, page);
 
   async function processPayload(payload) {
     if (payload?.object !== "page" || !Array.isArray(payload.entry)) return;
@@ -209,7 +225,7 @@ ${page.facts}` },
     if (results.some(result => result.status === "rejected")) throw Error("Clinic Messenger processing failed");
   }
 
-  return { processPayload, verifyPage };
+  return { processPayload, verifyPage, getPageToken, registerPage };
 }
 
 module.exports = { createClinicMessenger, parseClinicPages, pageNumber };

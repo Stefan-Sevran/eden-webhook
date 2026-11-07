@@ -201,6 +201,23 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return row ? { ...route, location: row } : null;
   }
 
+  async function saveMessengerCredential(pilot, ciphertext) {
+    return database("rpc/save_clinic_messenger_credential", {
+      method: "POST", body: JSON.stringify({
+        target_account: pilot.accountId, target_location: pilot.locationId,
+        target_page: pilot.pageId, encrypted_token: ciphertext
+      })
+    });
+  }
+
+  async function messengerCredential(connectionId) {
+    const params = new URLSearchParams({
+      select: "token_ciphertext", connection_id: "eq." + connectionId
+    });
+    const [row] = await database("clinic_messenger_credentials?" + params);
+    return row?.token_ciphertext ?? null;
+  }
+
   async function messengerCaseOpen(route, key) {
     const params = new URLSearchParams({
       select: "action", event_key: `eq.${key}`, account_id: `eq.${route.account_id}`,
@@ -311,6 +328,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
   return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection,
+    saveMessengerCredential, messengerCredential,
     messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
 

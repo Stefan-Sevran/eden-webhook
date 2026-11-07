@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { createClinicMessenger, parseClinicPages, pageNumber } = require("./clinic-messenger");
+const { createMessengerConnect, messengerConnectPilot } = require("./clinic-messenger-connect");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
@@ -65,12 +66,22 @@ try {
 }
 const clinicMessenger = createClinicMessenger({
   pages: clinicMessengerPages, appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
-  ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY
+  ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY,
+  getStoredPageToken: (pageId, route) => messengerConnect.pageToken(pageId, route)
 });
 const clinicTenantApi = createClinicTenantApi({
   url: process.env.SUPABASE_URL,
   publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY
 });
+const messengerConnect = createMessengerConnect({
+  appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
+  configId: process.env.META_MESSENGER_LOGIN_CONFIG_ID,
+  encryptionKey: process.env.CLINIC_MESSENGER_TOKEN_KEY,
+  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger
+});
+if (messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID) {
+  clinicMessenger.registerPage(messengerConnectPilot.pageId, messengerConnectPilot);
+}
 
 async function recordClinicOutcome(event) {
   const result = await outcomeLedger.record(event);
@@ -3330,6 +3341,9 @@ app.get("/clinic/public-config", (_req, res) => {
   res.json({
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
     publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
+    messengerConnect: messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID ? {
+      accountId: messengerConnectPilot.accountId, locationId: messengerConnectPilot.locationId
+    } : null,
     staffEmailAvailable: Boolean(outcomeLedger.enabled &&
       process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL)
   });
@@ -3351,6 +3365,8 @@ app.get("/clinic/connections", requireClinicUser,
       { locationId: req.query.locationId }))));
 app.post("/clinic/connections", requireClinicUser,
   clinicRoute(req => clinicTenantApi.requestConnection(req.clinicToken, req.body || {})));
+app.post("/clinic/messenger/start", requireClinicUser, clinicRoute(messengerConnect.start));
+app.post("/clinic/messenger/finish", requireClinicUser, clinicRoute(messengerConnect.finish));
 
 // An operator assigns a dedicated ElevenLabs agent and forwarding destination
 // to an existing clinic request. The first signed inbound test call activates it.
