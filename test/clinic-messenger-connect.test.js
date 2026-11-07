@@ -70,9 +70,11 @@ test("the second workspace gets its own Page, and an OAuth return cannot switch 
   const second = {
     accountId: "4aed5565-40a1-4b31-8d86-0c6c28f108d4",
     locationId: "296b09f3-5828-48df-9809-3263ac3f6de3",
-    pageId: "1234567890", clinicName: "Second test Page", facts: "Staff confirm appointments."
+    pageId: "1234567890", clinicName: "Second test Page", facts: "Staff confirm appointments.", dentalFaq: true
   };
   const pilots = parseMessengerPilots(JSON.stringify([second]), ["1086617101195136"]);
+  assert.equal(pilots.get(second.locationId).dentalFaq, true);
+  assert.equal(pilots.get(pilot.locationId).dentalFaq, false);
   assert.throws(() => parseMessengerPilots(JSON.stringify([{ ...second, pageId: pilot.pageId }]), []), /duplicate/);
   const { app, exchanges, pageToken, setRole } = fixture(second, pilots);
   const secondReq = { ...req, body: { accountId: second.accountId, locationId: second.locationId } };

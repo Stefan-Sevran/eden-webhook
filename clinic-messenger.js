@@ -2,6 +2,7 @@ const { createHmac } = require("node:crypto");
 const { createMessengerProcessor } = require("./messenger-events");
 const { outcomeKey } = require("./outcome-ledger");
 const { isUuid } = require("./clinic-tenant");
+const { dentalFaq, dentalFaqPolicy } = require("./dental-faq");
 
 const day = 24 * 60 * 60 * 1000;
 const pageNumber = /^\d{5,30}$/;
@@ -91,6 +92,9 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
 
   async function draftReply(page, previous, text) {
     if (!openaiKey) return fallback;
+    const useDentalFaq = page.dentalFaq === true;
+    const answerPolicy = useDentalFaq ? dentalFaqPolicy : "Answer using the approved facts only. If urgent, direct them to local emergency services.";
+    const education = useDentalFaq ? `\n\nGeneral dental FAQ:\n${dentalFaq}` : "";
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -100,10 +104,11 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
           model: "gpt-4o-mini", store: false, response_format: { type: "json_object" },
           max_tokens: 320,
           messages: [
-            { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Answer using the approved facts only. Do not give medical advice, promise availability, confirm appointments, ask for medical details, or repeat sensitive patient details. Offer one helpful next step in the visitor's language.
-Return JSON with intent (answer, booking, or handoff), reply, service, and requestedTime. For questions or tentative interest, answer first and ask one brief question. Use booking only when the person asks to book and has provided a service and preferred time or day, including when they say they are flexible. A booking is a request for staff confirmation. Use handoff for a human request, clinical/urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history. If urgent, direct them to local emergency services.
+            { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Do not give medical advice, promise availability, confirm appointments, ask for medical details, or repeat sensitive patient details. Offer one helpful next step in the visitor's language.
+Return JSON with intent (answer, booking, or handoff), reply, service, and requestedTime. For questions or tentative interest, answer first and ask one brief question. Use booking only when the person asks to book and has provided a service and preferred time or day, including when they say they are flexible. A booking is a request for staff confirmation. Use handoff for a human request, clinical/urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history.
+${answerPolicy}
 Approved clinic facts:
-${page.facts}` },
+${page.facts}${education}` },
             ...(previous ? [{ role: "assistant", content: previous.reply }] : []),
             { role: "user", content: JSON.stringify({
               priorService: previous?.service || "", priorRequestedTime: previous?.requestedTime || "",

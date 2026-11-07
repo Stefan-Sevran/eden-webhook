@@ -265,6 +265,14 @@ The Render JSON value is keyed by Page ID:
 }
 ```
 
+After clinical review, set `"dentalFaq": true` on an individual dental Page in
+`CLINIC_MESSENGER_PAGES` or on its browser-connected location in
+`CLINIC_MESSENGER_PILOT_LOCATIONS` to enable the shared dental education material
+in `dental-faq.js`. The approved clinic facts remain the source for local
+services, fees, hours, and booking rules. Review general explanations, questions
+about an unlisted service, personal suitability, and urgent signposting in a
+private test conversation before using it with patients.
+
 A booking request awaits staff confirmation. An open booking or staff handoff
 pauses automated replies on that conversation. Staff reply through the clinic's
 Page inbox and can mark the item handled or booked in Clinic Workspace. The
