@@ -145,3 +145,17 @@ test("Page verification identifies the failing check without exposing Meta error
     message: "Page webhook subscription check: Meta request failed: HTTP 400, code 190, subcode 463"
   });
 });
+
+test("Page verification logs only a fixed hint for a rejected app secret proof", async () => {
+  const messenger = createClinicMessenger({
+    pages: new Map(), appId, appSecret: "app-secret",
+    async fetchImpl() {
+      return Response.json({ error: {
+        code: 100, message: "Invalid appsecret_proof provided in the API argument: do not log this"
+      } }, { status: 400 });
+    }
+  });
+  await assert.rejects(messenger.verifyPage(pageId, page), {
+    message: "Page token identity check: Meta request failed: HTTP 400, code 100, subcode none, app secret proof rejected"
+  });
+});

@@ -26,6 +26,19 @@ function parseClinicPages(raw, edenPageId) {
   }));
 }
 
+function metaErrorHint(message) {
+  if (typeof message !== "string") return "";
+  const lower = message.toLowerCase();
+  // Map Meta's error text to fixed labels so responses cannot leak into logs.
+  if (lower.includes("invalid appsecret_proof")) return "app secret proof rejected";
+  if (lower.includes("require an appsecret_proof")) return "app secret proof required";
+  for (const permission of ["pages_manage_metadata", "pages_read_engagement", "pages_messaging"]) {
+    if (lower.includes(permission)) return `check ${permission} permission`;
+  }
+  if (lower.includes("unsupported get request")) return "unsupported Page read";
+  return "";
+}
+
 function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
@@ -44,7 +57,8 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     if (!response.ok || !data || data.error) {
       const code = Number.isInteger(data?.error?.code) ? data.error.code : "unknown";
       const subcode = Number.isInteger(data?.error?.error_subcode) ? data.error.error_subcode : "none";
-      throw Error(`Meta request failed: HTTP ${response.status}, code ${code}, subcode ${subcode}`);
+      const hint = metaErrorHint(data?.error?.message);
+      throw Error(`Meta request failed: HTTP ${response.status}, code ${code}, subcode ${subcode}${hint ? `, ${hint}` : ""}`);
     }
     return data;
   }
