@@ -227,6 +227,16 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     return !["handled", "booked"].includes(row?.action);
   }
 
+  async function commentDraft(route, postId, code, since) {
+    const params = new URLSearchParams({
+      select: "event_key", account_id: `eq.${route.account_id}`, location_id: `eq.${route.location_id}`,
+      channel: "eq.facebook_comment", kind: "eq.comment.draft", occurred_at: `gte.${since}`,
+      "details->>commentPilotPostId": `eq.${postId}`, "details->>commentPilotCode": `eq.${code}`, limit: "1"
+    });
+    const [row] = await database(`clinic_outcomes?${params}`);
+    return Boolean(row);
+  }
+
   async function messengerTurn(key) {
     const [row] = await database(`clinic_messenger_turns?event_key=eq.${key}&limit=1`);
     return row;
@@ -327,7 +337,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
 
   return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
-    provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection,
+    provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     saveMessengerCredential, messengerCredential,
     messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }

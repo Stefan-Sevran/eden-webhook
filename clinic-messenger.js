@@ -39,7 +39,7 @@ function metaErrorHint(message) {
   return "";
 }
 
-function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
 
@@ -148,12 +148,22 @@ ${page.facts}` },
       if (previous?.case_key && await ledger.messengerCaseOpen(route, previous.case_key)) return;
       const context = previous && !previous.case_key && Date.parse(previous.received_at) > now() - day
         ? previous.draft : null;
-      const draft = text && !hasAttachment ? await draftReply(page, context, text) : fallback;
+      const message = await commentPilot?.messageContext({ pageId, route, text, received,
+        previousSource: previous?.draft?.commentSource }) || { text };
+      let draft = fallback;
+      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text);
+      if (!hasAttachment && !message.text && message.source) {
+        draft = { intent: "answer", service: "", requestedTime: "",
+          reply: "Thanks for messaging us about our Facebook post. How can we help?" };
+      }
+      if (message.source) draft = { ...draft, commentSource: message.source };
       turn = await ledger.prepareMessengerTurn({
         event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
         draft, case_key: draft.intent === "answer" ? null : outcomeKey("clinic_messenger_case", eventKey)
       });
     }
+    const commentSource = turn.draft.commentSource;
+    if (commentSource?.received === received) await commentPilot?.recordStarted(route, conversationKey, commentSource);
     const canActivate = route.status === "verifying" && Boolean(turn.case_key);
     if (turn.state === "sent") {
       if (canActivate) await ledger.activateMessengerConnection(route);
@@ -167,6 +177,7 @@ ${page.facts}` },
       summary: intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
       details: {
         pageId, senderId, service: turn.draft.service, requestedTime: turn.draft.requestedTime,
+        ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
         ...(intent === "booking" ? { bookingId: key } : {})
       },
       notify_to: route.location.alert_email

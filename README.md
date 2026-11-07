@@ -273,3 +273,23 @@ send failed or a retry finds an interrupted send. Attachments are handed to
 staff. Public comments and self-serve Facebook authorization are outside this
 pilot. Keep one Render instance during the pilot because ordering within a
 conversation is local to the instance.
+
+### One-post Facebook comment pilot
+
+Set the optional `CLINIC_COMMENT_PILOT` value to a JSON object with `pageId`
+and `postId`. Use the connected clinic Page ID and the selected post's full
+Graph ID, in `PAGE_ID_POST_ID` format. Enable the Page `feed` webhook for this
+pilot Page alongside `messages`. Begin with a fresh top-level test comment
+from a separate Facebook account. Leave the setting empty to disable intake.
+
+The clinic workspace's Activity inbox shows short review drafts. Staff open
+the original comment, edit the wording if needed, and publish in Facebook.
+Keep the draft's tracking code in the posted reply for attribution. Eden does
+not store the original comment or comment author and has no public send step.
+
+The pilot counts tagged Messenger conversations, booking requests, and
+appointments staff mark booked in the latest 100 location inbox items. A
+conversation counts when a visitor sends the matching code. A booking in that
+thread can retain the source for seven days. Untagged messages and visits from
+a click-to-Messenger ad are outside this count. Use a fresh test thread or
+finish any open staff case before running the tracked test.
