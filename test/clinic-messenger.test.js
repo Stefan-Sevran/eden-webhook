@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createHmac } = require("node:crypto");
 const { createClinicMessenger, parseClinicPages } = require("../clinic-messenger");
+const { createCommentPilot, parseCommentPilot } = require("../clinic-comment-pilot");
 
 const pageId = "1234567890", appId = "9876543210", sender = "5555512345";
 const accountId = "9e939ec0-b740-448e-8a92-886548e922e2";
@@ -16,7 +17,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture() {
+function fixture(commentConfig) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
@@ -31,6 +32,11 @@ function fixture() {
       return [...turns.values()].reverse().find(turn => turn.conversation_key === key);
     },
     async messengerCaseOpen() { return !closed; },
+    async commentDraft(candidate, postId, code) {
+      return [...cases.values()].some(event => event.kind === "comment.draft" &&
+        event.account_id === candidate.account_id && event.location_id === candidate.location_id &&
+        event.details.commentPilotPostId === postId && event.details.commentPilotCode === code);
+    },
     async prepareMessengerTurn(turn) {
       const row = { ...turn, state: "prepared" };
       if (!turns.has(turn.event_key)) turns.set(turn.event_key, row);
@@ -44,10 +50,12 @@ function fixture() {
       return true;
     }
   };
+  async function recordOutcome(event) { if (!cases.has(event.event_key)) cases.set(event.event_key, event); }
+  const commentPilot = commentConfig && createCommentPilot({ config: commentConfig, ledger, recordOutcome,
+    getPage: id => id === pageId ? page : null, now: () => clock.now });
   const make = () => createClinicMessenger({
     pages: new Map([[pageId, page]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
-    logger: { warn() {} },
-    async recordOutcome(event) { if (!cases.has(event.event_key)) cases.set(event.event_key, event); },
+    logger: { warn() {} }, recordOutcome, commentPilot,
     async fetchImpl(url, options) {
       if (url.includes("api.openai.com")) {
         const body = JSON.parse(options.body);
@@ -71,7 +79,7 @@ function fixture() {
       return sendFails ? new Response(null, { status: 503 }) : Response.json({ message_id: "sent" });
     }
   });
-  return { make, turns, cases, sends, modelInputs, route,
+  return { make, turns, cases, sends, modelInputs, route, commentPilot,
     disconnect: () => { connected = false; }, close: () => { closed = true; },
     failSend: () => { sendFails = true; } };
 }
@@ -112,6 +120,53 @@ test("only a verified binding receives replies and a conversation creates one bo
   f.disconnect();
   await messenger.processPayload(payload("unapproved", "Hi", timestamp + 900));
   assert.equal(f.sends.length, 2);
+});
+
+test("one connected post produces review-only drafts and tags a later Messenger booking", async () => {
+  const postId = `${pageId}_1234567`;
+  const config = parseCommentPilot(JSON.stringify({ pageId, postId }));
+  assert.throws(() => parseCommentPilot(JSON.stringify({ pageId, postId: "987654321_1234567" })));
+  const f = fixture(config), messenger = f.make();
+  const comment = { item: "comment", verb: "add", post_id: postId, parent_id: "1234567",
+    comment_id: "1234567_1234568", sender_id: sender, created_time: timestamp / 1000,
+    message: "How much for braces? My number is 09000000000." };
+  const changes = [
+    comment, comment,
+    { ...comment, comment_id: "1234567_1234569", from: { id: pageId } },
+    { ...comment, comment_id: "1234567_1234570", parent_id: comment.comment_id },
+    { ...comment, comment_id: "1234567_1234571", post_id: `${pageId}_1234569` },
+    { ...comment, comment_id: "1234567_1234572", verb: "edited" }
+  ].map(value => ({ field: "feed", value }));
+  const feed = { object: "page", entry: [{ id: pageId, changes }] };
+  await f.commentPilot.processPayload(feed);
+  assert.equal(f.cases.size, 0);
+  f.route.status = "connected";
+  await Promise.all([f.commentPilot.processPayload(feed), f.commentPilot.processPayload(feed)]);
+  assert.equal(f.cases.size, 1);
+  assert.equal(f.sends.length, 0);
+  const [review] = f.cases.values();
+  assert.equal(review.status, "staff_review");
+  assert.equal(review.location_id, locationId);
+  assert.match(review.details.publicDraft, /pricing question/);
+  assert.doesNotMatch(JSON.stringify(review), /09000000000|How much for braces/);
+  const code = review.details.commentPilotCode;
+
+  await messenger.processPayload(payload("unknown-tag", "EDEN-FFFFFFFFFF"));
+  assert.equal(f.cases.size, 1);
+  const tagged = payload("known-tag", `${code} I want braces`, timestamp + 100);
+  await messenger.processPayload(tagged);
+  await f.make().processPayload(tagged);
+  assert.equal(f.cases.size, 2);
+  const modelMessage = JSON.parse(f.modelInputs.at(-1).messages.at(-1).content);
+  assert.equal(modelMessage.message, "I want braces");
+  await messenger.processPayload(payload("booking", "Saturday please", timestamp + 200));
+  const [draft, conversation, booking] = f.cases.values();
+  assert.equal(draft.kind, "comment.draft");
+  assert.equal(conversation.kind, "comment.messenger_started");
+  assert.equal(booking.kind, "booking.requested");
+  assert.equal(booking.details.commentPilotPostId, postId);
+  assert.equal(booking.details.commentPilotCode, code);
+  assert.equal(booking.details.requestedTime, "Saturday");
 });
 
 test("attachments hand off, and a rejected send is never retried after restart", async () => {

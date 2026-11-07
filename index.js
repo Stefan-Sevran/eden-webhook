@@ -3,6 +3,7 @@ const cors = require("cors");
 const { createMessengerProcessor } = require("./messenger-events");
 const { createClinicMessenger, parseClinicPages, pageNumber } = require("./clinic-messenger");
 const { createMessengerConnect, parseMessengerPilots, messengerConnectPilot } = require("./clinic-messenger-connect");
+const { createCommentPilot, parseCommentPilot } = require("./clinic-comment-pilot");
 const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
@@ -64,9 +65,24 @@ try {
 } catch {
   console.error("Clinic Messenger Page configuration is invalid");
 }
+let commentPilotConfig;
+try {
+  commentPilotConfig = parseCommentPilot(process.env.CLINIC_COMMENT_PILOT);
+} catch {
+  console.error("Facebook comment pilot configuration is invalid");
+}
+const commentPilot = createCommentPilot({ config: commentPilotConfig, ledger: outcomeLedger,
+  recordOutcome: recordClinicOutcome,
+  isAdmin: (req, accountId) => messengerConnect.isAdmin(req, accountId),
+  commentGraph: (...args) => clinicMessenger.commentGraph(...args),
+  getPage: pageId => {
+    const browserPage = messengerConnect.enabled && [...messengerPilots.values()].find(page => page.pageId === pageId);
+    return browserPage || clinicMessengerPages.get(pageId);
+  }
+});
 const clinicMessenger = createClinicMessenger({
   pages: clinicMessengerPages, appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
-  ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY,
+  ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY, commentPilot,
   getStoredPageToken: (pageId, route) => messengerConnect.pageToken(pageId, route)
 });
 const clinicTenantApi = createClinicTenantApi({
@@ -3235,7 +3251,8 @@ app.post("/webhook", async (req, res) => {
     }
     const [result] = await Promise.all([
       messengerProcessor.processPayload(req.body),
-      clinicMessenger.processPayload(req.body)
+      clinicMessenger.processPayload(req.body),
+      commentPilot.processPayload(req.body)
     ]);
     console.log("Messenger webhook handled", result);
     return res.sendStatus(200);
@@ -3353,6 +3370,7 @@ app.get("/clinic/public-config", (_req, res) => {
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
     publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
     messengerSetupAvailable: messengerConnect.enabled && messengerPilots.size > 0,
+    commentPilotPublishAvailable: commentPilotConfig?.publish === true,
     messengerConnect: messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID ? {
       accountId: messengerConnectPilot.accountId, locationId: messengerConnectPilot.locationId
     } : null,
@@ -3380,6 +3398,8 @@ app.post("/clinic/connections", requireClinicUser,
 app.get("/clinic/messenger/setups", requireClinicUser, clinicRoute(messengerConnect.setups));
 app.post("/clinic/messenger/start", requireClinicUser, clinicRoute(messengerConnect.start));
 app.post("/clinic/messenger/finish", requireClinicUser, clinicRoute(messengerConnect.finish));
+app.get("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.review));
+app.post("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.publish));
 
 // An operator assigns a dedicated ElevenLabs agent and forwarding destination
 // to an existing clinic request. The first signed inbound test call activates it.

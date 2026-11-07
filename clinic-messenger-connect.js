@@ -157,7 +157,7 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
     return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
   }
 
-  return { enabled, setups, start, finish, pageToken };
+  return { enabled, setups, start, finish, pageToken, isAdmin };
 }
 
 module.exports = { createMessengerConnect, parseMessengerPilots, messengerConnectPilot: pilot };

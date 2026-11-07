@@ -32,14 +32,14 @@ function metaErrorHint(message) {
   // Map Meta's error text to fixed labels so responses cannot leak into logs.
   if (lower.includes("invalid appsecret_proof")) return "app secret proof rejected";
   if (lower.includes("require an appsecret_proof")) return "app secret proof required";
-  for (const permission of ["pages_manage_metadata", "pages_read_engagement", "pages_messaging"]) {
+  for (const permission of ["pages_manage_metadata", "pages_read_engagement", "pages_messaging", "pages_manage_engagement"]) {
     if (lower.includes(permission)) return `check ${permission} permission`;
   }
   if (lower.includes("unsupported get request")) return "unsupported Page read";
   return "";
 }
 
-function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
 
@@ -67,6 +67,13 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
   async function getPageToken(pageId, userToken) {
     const identity = await graph(pageId + "?fields=id,access_token", { pageToken: userToken });
     return String(identity.id) === pageId ? identity.access_token : null;
+  }
+
+  async function commentGraph(pageId, page, route, commentId, message) {
+    const pageToken = await getStoredPageToken?.(pageId, route) || page.pageToken;
+    if (!pageToken) throw Object.assign(new Error("The Facebook Page must be reconnected"), { status: 409 });
+    const path = message ? `${commentId}/comments` : `${commentId}?fields=id,message,is_hidden`;
+    return graph(path, { pageToken }, message ? { message } : undefined);
   }
 
   async function verifyPage(pageId, page, { subscribe = false } = {}) {
@@ -148,12 +155,22 @@ ${page.facts}` },
       if (previous?.case_key && await ledger.messengerCaseOpen(route, previous.case_key)) return;
       const context = previous && !previous.case_key && Date.parse(previous.received_at) > now() - day
         ? previous.draft : null;
-      const draft = text && !hasAttachment ? await draftReply(page, context, text) : fallback;
+      const message = await commentPilot?.messageContext({ pageId, route, text, received,
+        previousSource: previous?.draft?.commentSource }) || { text };
+      let draft = fallback;
+      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text);
+      if (!hasAttachment && !message.text && message.source) {
+        draft = { intent: "answer", service: "", requestedTime: "",
+          reply: "Thanks for messaging us about our Facebook post. How can we help?" };
+      }
+      if (message.source) draft = { ...draft, commentSource: message.source };
       turn = await ledger.prepareMessengerTurn({
         event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
         draft, case_key: draft.intent === "answer" ? null : outcomeKey("clinic_messenger_case", eventKey)
       });
     }
+    const commentSource = turn.draft.commentSource;
+    if (commentSource?.received === received) await commentPilot?.recordStarted(route, conversationKey, commentSource);
     const canActivate = route.status === "verifying" && Boolean(turn.case_key);
     if (turn.state === "sent") {
       if (canActivate) await ledger.activateMessengerConnection(route);
@@ -167,6 +184,7 @@ ${page.facts}` },
       summary: intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
       details: {
         pageId, senderId, service: turn.draft.service, requestedTime: turn.draft.requestedTime,
+        ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
         ...(intent === "booking" ? { bookingId: key } : {})
       },
       notify_to: route.location.alert_email
@@ -226,7 +244,7 @@ ${page.facts}` },
     if (results.some(result => result.status === "rejected")) throw Error("Clinic Messenger processing failed");
   }
 
-  return { processPayload, verifyPage, getPageToken, registerPage };
+  return { processPayload, verifyPage, getPageToken, registerPage, commentGraph };
 }
 
 module.exports = { createClinicMessenger, parseClinicPages, pageNumber };
