@@ -113,6 +113,12 @@ test("a signed Messenger setup test becomes one sample only after Meta accepts t
   await messenger.processPayload(payload("test-first", "EDEN SETUP TEST signed"));
   await f.make().processPayload(payload("test-resend", "EDEN SETUP TEST signed"));
   assert.equal(f.sends.length, 1);
+  const reply = f.sends[0].message.text;
+  assert.match(reply, /tap Claim test inquiry/);
+  const setupUrl = new URL(reply.split("\n\n").at(-1));
+  assert.equal(setupUrl.origin + setupUrl.pathname, "https://clinicnet.live/clinic/");
+  assert.deepEqual(Object.fromEntries(setupUrl.searchParams), { messengerTest: "setup-one", account: accountId, location: locationId });
+  assert.doesNotMatch(reply, /EDEN SETUP TEST signed|page-key/);
   assert.equal(f.modelInputs.length, 0);
   assert.equal(f.route.status, "connected");
   assert.equal(f.cases.size, 1);
