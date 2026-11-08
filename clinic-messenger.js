@@ -39,7 +39,7 @@ function metaErrorHint(message) {
   return "";
 }
 
-function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot, readSetupTest,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
 
@@ -96,7 +96,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return (await readSubscription()).includes("messages");
   }
 
-  async function draftReply(page, previous, text) {
+  async function draftReply(page, previous, text, facts) {
     if (!openaiKey) return fallback;
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
@@ -110,7 +110,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
             { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Answer using the approved facts only. Do not give medical advice, promise availability, confirm appointments, ask for medical details, or repeat sensitive patient details. Offer one helpful next step in the visitor's language.
 Return JSON with intent (answer, booking, or handoff), reply, service, and requestedTime. For questions or tentative interest, answer first and ask one brief question. Use booking only when the person asks to book and has provided a service and preferred time or day, including when they say they are flexible. A booking is a request for staff confirmation. Use handoff for a human request, clinical/urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history. If urgent, direct them to local emergency services.
 Approved clinic facts:
-${page.facts}` },
+${facts ? JSON.stringify(facts) : page.facts}` },
             ...(previous ? [{ role: "assistant", content: previous.reply }] : []),
             { role: "user", content: JSON.stringify({
               priorService: previous?.service || "", priorRequestedTime: previous?.requestedTime || "",
@@ -127,6 +127,10 @@ ${page.facts}` },
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim() ||
           (draft.intent === "booking" && (!service || !requestedTime))) return fallback;
+      if (draft.intent === "booking" && facts?.bookingMode === "information") {
+        return { intent: "answer", reply: "The clinic team handles appointments. Please contact them to request a time.",
+          service, requestedTime: "" };
+      }
       const reply = draft.intent === "booking"
         ? "I’ve passed your booking request to the clinic team. They’ll confirm the appointment with you here."
         : draft.reply.trim().slice(0, 900);
@@ -146,9 +150,22 @@ ${page.facts}` },
     const pageToken = (await getStoredPageToken?.(pageId, route)) || page.pageToken;
     if (!pageToken) return;
 
-    const conversationKey = outcomeKey("clinic_messenger_thread", route.account_id, route.location_id, pageId, senderId);
-    const eventKey = outcomeKey("clinic_messenger_turn", conversationKey, messageId);
+    const isSetupMessage = route.location.messenger_facts && text.trim().startsWith("EDEN SETUP TEST ");
+    const testId = isSetupMessage && !hasAttachment && readSetupTest?.(text.trim(), pageId, page, received);
+    if (isSetupMessage && !testId) return;
+    const conversationKey = testId
+      ? outcomeKey("clinic_messenger_setup_test", route.account_id, route.location_id, pageId, testId)
+      : outcomeKey("clinic_messenger_thread", route.account_id, route.location_id, pageId, senderId);
+    const eventKey = outcomeKey("clinic_messenger_turn", conversationKey, testId || messageId);
     let turn = await ledger.messengerTurn(eventKey);
+    if (!turn && testId) {
+      turn = await ledger.prepareMessengerTurn({
+        event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
+        draft: { intent: "booking", service: "Sample consultation", requestedTime: "Example weekday afternoon",
+          reply: "This is a setup test. Your sample booking request is ready for staff to claim in Clinic Workspace." },
+        case_key: outcomeKey("clinic_messenger_case", eventKey)
+      });
+    }
     if (!turn) {
       const previous = await ledger.recentMessengerTurn(conversationKey);
       if (previous && Date.parse(previous.received_at) > received) return;
@@ -158,7 +175,7 @@ ${page.facts}` },
       const message = await commentPilot?.messageContext({ pageId, route, text, received,
         previousSource: previous?.draft?.commentSource }) || { text };
       let draft = fallback;
-      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text);
+      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text, route.location.messenger_facts);
       if (!hasAttachment && !message.text && message.source) {
         draft = { intent: "answer", service: "", requestedTime: "",
           reply: "Thanks for messaging us about our Facebook post. How can we help?" };
@@ -172,34 +189,36 @@ ${page.facts}` },
     const commentSource = turn.draft.commentSource;
     if (commentSource?.received === received) await commentPilot?.recordStarted(route, conversationKey, commentSource);
     const canActivate = route.status === "verifying" && Boolean(turn.case_key);
-    if (turn.state === "sent") {
-      if (canActivate) await ledger.activateMessengerConnection(route);
-      return;
-    }
-
     const saveCase = (key, intent) => recordOutcome({
       event_key: key, clinic_id: route.location_id, account_id: route.account_id, location_id: route.location_id,
       channel: "facebook_messenger", kind: intent === "booking" ? "booking.requested" : "inquiry.followup_needed",
       status: intent === "booking" ? "AWAITING_CLINIC" : "NEEDS_STAFF",
-      summary: intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
+      summary: testId ? "Messenger setup test" :
+        intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
       details: {
-        pageId, senderId, service: turn.draft.service, requestedTime: turn.draft.requestedTime,
+        pageId, ...(testId ? { demo: true, messengerSetupTestId: testId } : { senderId }),
+        service: turn.draft.service, requestedTime: turn.draft.requestedTime,
         ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
         ...(intent === "booking" ? { bookingId: key } : {})
       },
-      notify_to: route.location.alert_email
+      notify_to: testId ? null : route.location.alert_email
     });
+    const finishSent = async () => {
+      if (testId) await saveCase(turn.case_key, "booking");
+      if (canActivate) await ledger.activateMessengerConnection(route);
+    };
+    if (turn.state === "sent") return finishSent();
 
     if (turn.state === "sending" || turn.state === "needs_review") {
       if (turn.state === "sending" && now() - Date.parse(turn.updated_at) < 20000) {
         throw Error("Messenger reply is still in flight");
       }
       const key = turn.case_key || outcomeKey("clinic_messenger_case", eventKey);
-      await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
+      if (!testId) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
       await ledger.updateMessengerTurn(eventKey, turn.state, "needs_review", key);
       return;
     }
-    if (turn.case_key) await saveCase(turn.case_key, turn.draft.intent);
+    if (turn.case_key && !testId) await saveCase(turn.case_key, turn.draft.intent);
     if (received <= now() - day) return;
     if (!await ledger.updateMessengerTurn(eventKey, "prepared", "sending")) {
       throw Error("Messenger reply already claimed");
@@ -213,14 +232,15 @@ ${page.facts}` },
       if (!send.message_id) throw Error("Meta did not confirm the reply");
     } catch {
       const key = turn.case_key || outcomeKey("clinic_messenger_case", eventKey);
-      await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
+      if (!testId) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
       await ledger.updateMessengerTurn(eventKey, "sending", "needs_review", key);
       logger.warn("Clinic Messenger reply needs staff review");
       return;
     }
 
-    await ledger.updateMessengerTurn(eventKey, "sending", "sent");
-    if (canActivate) await ledger.activateMessengerConnection(route);
+    const markedSent = await ledger.updateMessengerTurn(eventKey, "sending", "sent");
+    if (testId && !markedSent) throw Error("Messenger setup reply could not be recorded");
+    await finishSent();
   }
 
   function registerPage(pageId, page) {

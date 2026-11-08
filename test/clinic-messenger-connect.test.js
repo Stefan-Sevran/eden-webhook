@@ -2,18 +2,26 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createMessengerConnect, parseMessengerPilots, messengerConnectPilot: pilot } = require("../clinic-messenger-connect");
 
-function fixture(target = pilot, pilots) {
+function fixture(target = pilot, pilots, guidedMessengerSetup = false) {
   let clock = Date.parse("2026-11-07T07:00:00Z");
   let role = "admin";
   let stored;
+  let facts;
   const exchanges = [];
   const pageToken = "meta_page_credential_for_testing";
   const app = createMessengerConnect({
     appId: "980837197825196", appSecret: "test-secret", configId: "1234567", encryptionKey: "ab".repeat(32),
-    now: () => clock, pilots,
-    clinicTenantApi: { enabled: true, request: async () => [{ role }] },
+    now: () => clock, pilots, guidedMessengerSetup,
+    clinicTenantApi: { enabled: true, request: async (_, path) => path.startsWith("clinic_locations?")
+      ? [{ id: target.locationId, messenger_facts: facts }] : [{ role }] },
     ledger: {
       enabled: true,
+      async saveMessengerFacts(savedTarget, value) {
+        assert.equal(savedTarget.locationId, target.locationId);
+        facts = value;
+        return facts;
+      },
+      async messengerLocation() { return { location: { messenger_facts: facts } }; },
       async saveMessengerCredential(savedTarget, encrypted) {
         assert.equal(savedTarget.locationId, target.locationId);
         assert.ok(!encrypted.includes(pageToken));
@@ -64,6 +72,27 @@ test("connects Glow with a server-side code exchange and stores a scoped encrypt
   const route = { id: "test-route", account_id: pilot.accountId, location_id: pilot.locationId };
   assert.equal(await app.pageToken(pilot.pageId, route), pageToken);
   assert.equal(await app.pageToken(pilot.pageId, { ...route, location_id: "other" }), null);
+});
+
+test("only pilot administrators can confirm facts and issue a Page-bound setup test", async () => {
+  const { app, setRole } = fixture(pilot, undefined, true);
+  const facts = { services: " Cleanings ", hours: "Weekdays", address: "Main Street", bookingRules: "Staff confirm times" };
+  const save = { ...req, body: { ...req.body, facts } };
+  await assert.rejects(app.startTest(req), { status: 409 });
+  await assert.rejects(app.saveFacts({ ...save, body: { ...save.body, facts: { ...facts, hours: " " } } }), { status: 400 });
+  setRole("staff");
+  await assert.rejects(app.saveFacts(save), { status: 403 });
+  await assert.rejects(app.startTest(req), { status: 403 });
+  setRole("admin");
+  const expected = { ...facts, services: "Cleanings" };
+  assert.deepEqual(await app.saveFacts(save), { facts: expected });
+  assert.deepEqual((await app.setups({ ...req, query: { accountId: pilot.accountId } }))[0].facts, expected);
+  const { message, testId, expiresAt } = await app.startTest(req);
+  assert.equal(app.readSetupTest(message, pilot.pageId, pilot, expiresAt - 1000), testId);
+  assert.equal(app.readSetupTest(message, pilot.pageId, pilot, expiresAt + 1), null);
+  assert.equal(app.readSetupTest(message, "1234567890", pilot, expiresAt - 1000), null);
+  assert.equal(app.readSetupTest(message.replace(/.$/, message.endsWith("A") ? "Q" : "A"), pilot.pageId, pilot, expiresAt - 1000), null);
+  await assert.rejects(fixture().app.saveFacts(save), { status: 503 });
 });
 
 test("the second workspace gets its own Page, and an OAuth return cannot switch clinics", async () => {
