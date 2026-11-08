@@ -159,10 +159,12 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
     const eventKey = outcomeKey("clinic_messenger_turn", conversationKey, testId || messageId);
     let turn = await ledger.messengerTurn(eventKey);
     if (!turn && testId) {
+      const setupUrl = new URL("https://clinicnet.live/clinic/");
+      setupUrl.search = new URLSearchParams({ messengerTest: testId, account: route.account_id, location: route.location_id });
       turn = await ledger.prepareMessengerTurn({
         event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
         draft: { intent: "booking", service: "Sample consultation", requestedTime: "Example weekday afternoon",
-          reply: "This is a setup test. Your sample booking request is ready for staff to claim in Clinic Workspace." },
+          reply: "Eden received your test message. Open your setup page and tap Claim test inquiry to assign the test to yourself and finish setup.\n\n" + setupUrl.href },
         case_key: outcomeKey("clinic_messenger_case", eventKey)
       });
     }
