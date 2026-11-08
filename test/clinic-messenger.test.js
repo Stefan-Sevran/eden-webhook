@@ -17,7 +17,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture(commentConfig) {
+function fixture(commentConfig, readSetupTest) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
@@ -55,12 +55,13 @@ function fixture(commentConfig) {
     getPage: id => id === pageId ? page : null, now: () => clock.now });
   const make = () => createClinicMessenger({
     pages: new Map([[pageId, page]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
-    logger: { warn() {} }, recordOutcome, commentPilot,
+    logger: { warn() {} }, recordOutcome, commentPilot, readSetupTest,
     async fetchImpl(url, options) {
       if (url.includes("api.openai.com")) {
         const body = JSON.parse(options.body);
         modelInputs.push(body);
-        assert.match(body.messages[0].content, /Pearl Dental[\s\S]*Open 9–5/);
+        assert.ok(body.messages[0].content.includes(route.location.messenger_facts ?
+          JSON.stringify(route.location.messenger_facts) : "Open 9–5"));
         const input = JSON.parse(body.messages.at(-1).content);
         const draft = input.message === "Saturday please" ?
           { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedTime: "Saturday" } :
@@ -88,6 +89,45 @@ test("clinic Page config cannot replace Eden's Page or point to an invalid tenan
   assert.equal(parseClinicPages(undefined, pageId).size, 0);
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: page }), pageId));
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: { ...page, locationId: "other" } }), "999999"));
+});
+
+test("Messenger uses the confirmed facts and respects the clinic's appointment handling", async () => {
+  const f = fixture();
+  f.route.location.messenger_facts = { services: "Dental exam", hours: "10–4", bookingMode: "information" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("hours-confirmed", "What hours are you open?"));
+  await messenger.processPayload(payload("no-booking", "Saturday please"));
+  assert.match(f.modelInputs[0].messages[0].content, /Dental exam/);
+  assert.doesNotMatch(f.modelInputs[0].messages[0].content, /Open 9–5/);
+  assert.match(f.sends[1].message.text, /clinic team handles appointments/);
+  assert.equal(f.cases.size, 0);
+});
+
+test("a signed Messenger setup test becomes one sample only after Meta accepts the reply", async () => {
+  const recognize = text => text === "EDEN SETUP TEST signed" ? "setup-one" : null;
+  const f = fixture(null, recognize);
+  f.route.location.messenger_facts = { hours: "10–4" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("invalid-test", "EDEN SETUP TEST invalid"));
+  assert.equal(f.sends.length, 0);
+  await messenger.processPayload(payload("test-first", "EDEN SETUP TEST signed"));
+  await f.make().processPayload(payload("test-resend", "EDEN SETUP TEST signed"));
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.modelInputs.length, 0);
+  assert.equal(f.route.status, "connected");
+  assert.equal(f.cases.size, 1);
+  const [sample] = f.cases.values();
+  assert.equal(sample.details.demo, true);
+  assert.equal(sample.details.messengerSetupTestId, "setup-one");
+  assert.equal(sample.details.senderId, undefined);
+  assert.equal(sample.notify_to, null);
+
+  const failed = fixture(null, recognize);
+  failed.route.location.messenger_facts = { hours: "10–4" };
+  failed.failSend();
+  await failed.make().processPayload(payload("test-failed", "EDEN SETUP TEST signed"));
+  assert.equal(failed.cases.size, 0);
+  assert.equal(failed.route.status, "verifying");
 });
 
 test("only a verified binding receives replies and a conversation creates one booking request", async () => {

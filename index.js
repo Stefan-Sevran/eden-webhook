@@ -52,12 +52,14 @@ const ELEVEN_WEBHOOK_SECRET = process.env.ELEVEN_WEBHOOK_SECRET;
 const OPS_API_KEY = process.env.OPS_API_KEY;
 const BOOKING_INGEST_KEY = process.env.BOOKING_INGEST_KEY;
 const EDEN_ALERT_EMAIL = process.env.EDEN_ALERT_EMAIL;
+const guidedMessengerSetup = process.env.CLINIC_MESSENGER_GUIDED_SETUP === "true";
 const clinicAlertEmails = parseAlertEmails(process.env.CLINIC_ALERT_EMAILS);
 const outcomeLedger = createOutcomeLedger({
   url: process.env.SUPABASE_URL,
   key: process.env.SUPABASE_SECRET_KEY,
   resendKey: process.env.RESEND_API_KEY,
-  fromEmail: process.env.RESEND_FROM_EMAIL
+  fromEmail: process.env.RESEND_FROM_EMAIL,
+  guidedMessengerSetup
 });
 let clinicMessengerPages = new Map();
 try {
@@ -83,7 +85,8 @@ const commentPilot = createCommentPilot({ config: commentPilotConfig, ledger: ou
 const clinicMessenger = createClinicMessenger({
   pages: clinicMessengerPages, appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY, commentPilot,
-  getStoredPageToken: (pageId, route) => messengerConnect.pageToken(pageId, route)
+  getStoredPageToken: (pageId, route) => messengerConnect.pageToken(pageId, route),
+  readSetupTest: (...args) => messengerConnect.readSetupTest(...args)
 });
 const clinicTenantApi = createClinicTenantApi({
   url: process.env.SUPABASE_URL,
@@ -104,7 +107,7 @@ const messengerConnect = createMessengerConnect({
   appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   configId: process.env.META_MESSENGER_LOGIN_CONFIG_ID,
   encryptionKey: process.env.CLINIC_MESSENGER_TOKEN_KEY,
-  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots
+  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots, guidedMessengerSetup
 });
 if (messengerConnect.enabled) {
   for (const target of messengerPilots.values()) clinicMessenger.registerPage(target.pageId, target);
@@ -3398,6 +3401,8 @@ app.post("/clinic/connections", requireClinicUser,
 app.get("/clinic/messenger/setups", requireClinicUser, clinicRoute(messengerConnect.setups));
 app.post("/clinic/messenger/start", requireClinicUser, clinicRoute(messengerConnect.start));
 app.post("/clinic/messenger/finish", requireClinicUser, clinicRoute(messengerConnect.finish));
+app.post("/clinic/messenger/facts", requireClinicUser, clinicRoute(messengerConnect.saveFacts));
+app.post("/clinic/messenger/test", requireClinicUser, clinicRoute(messengerConnect.startTest));
 app.get("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.review));
 app.post("/clinic/comment-replies", requireClinicUser, clinicRoute(commentPilot.publish));
 

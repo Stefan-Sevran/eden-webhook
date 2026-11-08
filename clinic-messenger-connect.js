@@ -13,6 +13,8 @@ const pilot = Object.freeze({
 const redirectUri = "https://clinicnet.live/clinic/";
 const statePrefix = "eden-messenger";
 const stateDuration = 10 * 60 * 1000;
+const testDuration = 30 * 60 * 1000;
+const factsFields = ["services", "hours", "address", "bookingRules"];
 const graphBase = "https://graph.facebook.com/v25.0/";
 const tokenFormat = /^[a-zA-Z0-9_-]{20,4096}$/;
 
@@ -45,7 +47,8 @@ function parseMessengerPilots(raw, reservedPageIds) {
 }
 
 function createMessengerConnect({ appId, appSecret, configId, encryptionKey, ledger,
-  clinicTenantApi, messenger, pilots = new Map([[pilot.locationId, pilot]]), fetchImpl = fetch, now = Date.now }) {
+  clinicTenantApi, messenger, pilots = new Map([[pilot.locationId, pilot]]), guidedMessengerSetup = false,
+  fetchImpl = fetch, now = Date.now }) {
   const enabled = Boolean(/^\d{5,30}$/.test(appId || "") && appSecret &&
     /^\d{5,30}$/.test(configId || "") && /^[a-f0-9]{64}$/i.test(encryptionKey || "") &&
     ledger.enabled && clinicTenantApi.enabled);
@@ -64,7 +67,13 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
     if (!isUuid(accountId)) throw connectionError(400, "Invalid clinic account");
     const targets = [...pilots.values()].filter(target => target.accountId === accountId);
     if (!enabled || !targets.length || !await isAdmin(req, accountId)) return [];
-    return targets.map(({ locationId, clinicName, pageUrl }) => ({ locationId, clinicName, pageUrl }));
+    if (!guidedMessengerSetup) return targets.map(({ locationId, clinicName, pageUrl }) => ({ locationId, clinicName, pageUrl }));
+    const filter = new URLSearchParams({ select: "id,messenger_facts", account_id: "eq." + accountId });
+    const locations = await clinicTenantApi.request(req.clinicToken, "clinic_locations?" + filter);
+    return targets.map(({ locationId, pageId, clinicName, pageUrl }) => ({
+      locationId, clinicName, pageUrl: pageUrl || `https://www.facebook.com/${pageId}`,
+      facts: locations.find(location => location.id === locationId)?.messenger_facts ?? null
+    }));
   }
 
   async function requirePilotAdmin(req) {
@@ -77,6 +86,57 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
       throw connectionError(403, "Messenger connection requires a clinic admin");
     }
     return target;
+  }
+
+  async function saveFacts(req) {
+    if (!guidedMessengerSetup) throw connectionError(503, "Guided Messenger setup is unavailable");
+    const target = await requirePilotAdmin(req);
+    const facts = {};
+    for (const field of factsFields) {
+      const value = req.body.facts?.[field];
+      if (typeof value !== "string" || !value.trim() || value.length > 900) {
+        throw connectionError(400, "Each clinic fact must contain 1 to 900 characters");
+      }
+      facts[field] = value.trim();
+    }
+    const { language, bookingMode } = req.body.facts;
+    if (language !== undefined && (typeof language !== "string" || language.length > 120)) {
+      throw connectionError(400, "Invalid preferred language");
+    }
+    if (bookingMode !== undefined && !["request", "information"].includes(bookingMode)) {
+      throw connectionError(400, "Invalid appointment handling");
+    }
+    if (language?.trim()) facts.language = language.trim();
+    if (bookingMode) facts.bookingMode = bookingMode;
+    const saved = await ledger.saveMessengerFacts(target, facts);
+    if (!saved) throw connectionError(404, "Clinic location not found");
+    return { facts: saved };
+  }
+
+  function testSignature(value, target) {
+    return createHmac("sha256", key)
+      .update(JSON.stringify(["messenger-setup-test", value, target.accountId, target.locationId, target.pageId]))
+      .digest("base64url");
+  }
+
+  async function startTest(req) {
+    if (!guidedMessengerSetup) throw connectionError(503, "Guided Messenger setup is unavailable");
+    const target = await requirePilotAdmin(req);
+    const route = await ledger.messengerLocation(target.pageId, target);
+    if (!route?.location.messenger_facts) throw connectionError(409, "Confirm clinic facts and authorize the Facebook Page first");
+    const expiresAt = now() + testDuration;
+    const testId = randomBytes(12).toString("base64url");
+    const value = `${expiresAt}.${testId}`;
+    return { testId, expiresAt, message: `EDEN SETUP TEST ${value}.${testSignature(value, target)}` };
+  }
+
+  function readSetupTest(text, pageId, page, received) {
+    const target = pilots.get(page.locationId);
+    const match = /^EDEN SETUP TEST ((\d{13})\.([a-zA-Z0-9_-]{16}))\.([a-zA-Z0-9_-]{43})$/.exec(text || "");
+    if (!enabled || !guidedMessengerSetup || !target || target.pageId !== pageId || target.accountId !== page.accountId || !match) return null;
+    const expiry = Number(match[2]);
+    if (received < expiry - testDuration - 60000 || received > expiry) return null;
+    return timingSafeEqual(Buffer.from(match[4]), Buffer.from(testSignature(match[1], target))) ? match[3] : null;
   }
 
   function signature(value, userId, locationId) {
@@ -157,7 +217,7 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
     return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
   }
 
-  return { enabled, setups, start, finish, pageToken, isAdmin };
+  return { enabled, setups, start, finish, pageToken, isAdmin, saveFacts, startTest, readSetupTest };
 }
 
 module.exports = { createMessengerConnect, parseMessengerPilots, messengerConnectPilot: pilot };

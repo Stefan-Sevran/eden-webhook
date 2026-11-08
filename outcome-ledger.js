@@ -25,7 +25,7 @@ function parseAlertEmails(raw) {
   return parsed;
 }
 
-function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch }) {
+function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSetup = false, fetchImpl = fetch }) {
   const enabled = Boolean(url && key);
   const base = enabled ? `${url.replace(/\/$/, "")}/rest/v1` : "";
 
@@ -195,10 +195,22 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     const [route] = await database(`clinic_channel_connections?${params}`);
     if (!route) return null;
     const location = new URLSearchParams({
-      select: "alert_email", id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
+      select: guidedMessengerSetup ? "alert_email,messenger_facts" : "alert_email",
+      id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
     });
     const [row] = await database(`clinic_locations?${location}`);
     return row ? { ...route, location: row } : null;
+  }
+
+  async function saveMessengerFacts({ accountId, locationId }, facts) {
+    const params = new URLSearchParams({
+      select: "messenger_facts", id: `eq.${locationId}`, account_id: `eq.${accountId}`
+    });
+    const [row] = await database(`clinic_locations?${params}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ messenger_facts: facts })
+    });
+    return row?.messenger_facts ?? null;
   }
 
   async function saveMessengerCredential(pilot, ciphertext) {
@@ -359,7 +371,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, fetchImpl = fetch
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,
-    saveMessengerCredential, messengerCredential,
+    saveMessengerCredential, messengerCredential, saveMessengerFacts,
     messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
 

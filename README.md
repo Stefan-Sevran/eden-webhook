@@ -274,6 +274,16 @@ staff. Public comments and self-serve Facebook authorization are outside this
 pilot. Keep one Render instance during the pilot because ordering within a
 conversation is local to the instance.
 
+### Guided Messenger setup for pilot locations
+
+Apply `sql/clinic-messenger-facts.sql` before setting
+`CLINIC_MESSENGER_GUIDED_SETUP=true`. The guide is available to owners and admins
+of locations in the browser Messenger pilot. Confirmed location facts take
+priority over the existing pilot text. The setup test uses a short-lived signed
+message and creates a fictional, claimable Workspace item after Meta accepts
+the reply. It skips staff email and runs in a separate test conversation state.
+The regular Messenger flow remains available when the guide flag is off.
+
 ### One-post Facebook comment pilot
 
 Set the optional `CLINIC_COMMENT_PILOT` value to a JSON object with `pageId`
