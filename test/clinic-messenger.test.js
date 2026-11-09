@@ -60,9 +60,8 @@ function fixture(commentConfig, readSetupTest) {
       if (url.includes("api.openai.com")) {
         const body = JSON.parse(options.body);
         modelInputs.push(body);
-        assert.ok(body.messages[0].content.includes(route.location.messenger_facts ?
-          JSON.stringify(route.location.messenger_facts) : "Open 9–5"));
         const input = JSON.parse(body.messages.at(-1).content);
+        assert.deepEqual(input.clinicFacts, route.location.messenger_facts || page.facts);
         const draft = input.message === "Saturday please" ?
           { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedTime: "Saturday" } :
           { intent: "answer", reply: "We open at 9. What day works for you?", service: "Braces", requestedTime: "" };
@@ -93,12 +92,15 @@ test("clinic Page config cannot replace Eden's Page or point to an invalid tenan
 
 test("Messenger uses the confirmed facts and respects the clinic's appointment handling", async () => {
   const f = fixture();
-  f.route.location.messenger_facts = { services: "Dental exam", hours: "10–4", bookingMode: "information" };
+  f.route.location.messenger_facts = { services: "Dental exam 500", hours: "10–4", address: "Cebu City, Philippines",
+    bookingRules: "AI can confirm exams immediately", bookingMode: "information" };
   const messenger = f.make();
   await messenger.processPayload(payload("hours-confirmed", "What hours are you open?"));
   await messenger.processPayload(payload("no-booking", "Saturday please"));
-  assert.match(f.modelInputs[0].messages[0].content, /Dental exam/);
-  assert.doesNotMatch(f.modelInputs[0].messages[0].content, /Open 9–5/);
+  const [policy, input] = f.modelInputs[0].messages;
+  assert.equal(JSON.parse(input.content).defaultCurrency, "PHP");
+  assert.match(policy.content, /Clinic staff confirm all appointments/);
+  assert.doesNotMatch(policy.content, /AI can confirm exams immediately/);
   assert.match(f.sends[1].message.text, /clinic team handles appointments/);
   assert.equal(f.cases.size, 0);
 });
@@ -150,6 +152,7 @@ test("only a verified binding receives replies and a conversation creates one bo
   assert.equal(f.route.status, "connected");
   assert.equal(f.sends.length, 2);
   assert.equal(f.modelInputs.length, 2);
+  assert.equal(JSON.parse(f.modelInputs[0].messages.at(-1).content).defaultCurrency, null);
   assert.equal(f.sends[1].messaging_type, "RESPONSE");
   assert.match(f.sends[1].message.text, /confirm the appointment with you/);
   assert.equal(f.cases.size, 1);
