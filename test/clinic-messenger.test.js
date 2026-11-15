@@ -189,6 +189,38 @@ test("Messenger carries the requested day into the time clarification and books 
   assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday at 3 pm");
 });
 
+test("Messenger carries whitening interest forward after a brief acknowledgement", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message === "Which whitening option gives the best result?") {
+      return { intent: "answer", reply: "The clinic team can help choose what suits you. What day works for a whitening consultation?",
+        service: "Whitening consultation", requestedTime: "" };
+    }
+    assert.equal(input.priorService, "Whitening consultation");
+    if (input.message === "Ok") {
+      return { intent: "answer", reply: "What day and time would work for your whitening consultation?",
+        service: input.priorService, requestedTime: "" };
+    }
+    return { intent: "booking", reply: "The team will confirm with you.",
+      service: input.priorService, requestedTime: "Thursday at 3 pm" };
+  });
+  f.route.location.messenger_facts = { services: "Whitening consultation", bookingMode: "request" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("whitening-options", "Which whitening option gives the best result?"));
+  assert.equal(f.cases.size, 0);
+  await messenger.processPayload(payload("whitening-ok", "Ok", timestamp + 200));
+  const [instructions, priorReply] = f.modelInputs[1].messages;
+  assert.match(instructions.content, /offer a concrete booking next step/);
+  assert.match(instructions.content, /A bare acknowledgement without an agreed preference is not permission/);
+  assert.match(priorReply.content, /whitening consultation/);
+  assert.equal(f.sends[1].message.text, "What day and time would work for your whitening consultation?");
+  assert.equal(f.cases.size, 0);
+  await messenger.processPayload(payload("whitening-time", "I'd like Thursday at 3 pm", timestamp + 400));
+  assert.equal(f.cases.size, 1);
+  const [booking] = f.cases.values();
+  assert.equal(booking.status, "AWAITING_CLINIC");
+  assert.equal(booking.details.requestedTime, "Thursday at 3 pm");
+});
+
 test("one connected post produces review-only drafts and tags a later Messenger booking", async () => {
   const postId = `${pageId}_1234567`;
   const config = parseCommentPilot(JSON.stringify({ pageId, postId }));
