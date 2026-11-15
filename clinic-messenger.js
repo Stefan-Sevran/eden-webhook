@@ -10,6 +10,30 @@ const fallback = {
   reply: "I’ll ask the clinic team to help here. They’ll follow up as soon as they can."
 };
 
+function normalizeTopics(values) {
+  const topics = new Map();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const label = value.trim().replace(/\s+/g, " ").slice(0, 50);
+    if (!label || topics.has(label.toLowerCase())) continue;
+    topics.set(label.toLowerCase(), label);
+    if (topics.size === 3) break;
+  }
+  return [...topics.values()];
+}
+
+function administrativeHandoff(draft) {
+  if (draft.handoffReason) return draft.handoffReason === "administrative";
+  // Insurance was previously recorded as a service rather than a handoff reason.
+  return /^insurance(?: inquir(?:y|ies))?$/i.test(draft.service?.trim() || "");
+}
+
+async function openCaseStatus(ledger, route, caseKey) {
+  if (!caseKey) return "closed";
+  const action = await ledger.messengerCaseStatus(route, caseKey);
+  return ["handled", "booked"].includes(action) ? "closed" : action === "claimed" ? "claimed" : "unclaimed";
+}
+
 function parseClinicPages(raw, edenPageId) {
   if (!raw) return new Map();
   const config = JSON.parse(raw);
@@ -96,8 +120,8 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return (await readSubscription()).includes("messages");
   }
 
-  async function draftReply(page, previous, text, facts) {
-    if (!openaiKey) return fallback;
+  async function draftReply(page, previous, text, facts, awaitingStaff = false) {
+    if (!openaiKey) return awaitingStaff ? null : fallback;
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -105,38 +129,55 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
         signal: AbortSignal.timeout(8000),
         body: JSON.stringify({
           model: "gpt-4o-mini", store: false, response_format: { type: "json_object" },
-          max_tokens: 320,
+          max_tokens: 380,
           messages: [
             { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Answer using the approved facts only. Do not give medical advice, promise availability, confirm appointments, ask for medical details, or repeat sensitive patient details. Offer one helpful next step in the visitor's language.
-Return JSON with intent (answer, booking, or handoff), reply, service, and requestedTime. For questions or tentative interest, answer first and ask one brief question. Use booking only when the person asks to book and has provided a service and preferred time or day, including when they say they are flexible. A booking is a request for staff confirmation. Use handoff for a human request, clinical/urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history. If urgent, direct them to local emergency services.
+Return JSON with intent (answer, booking, or handoff), reply, service, requestedTime, topics, and handoffReason.
+Topics is up to three distinct, short labels for the visitor’s reasons for contacting the clinic. Preserve earlier relevant topics as well as new ones, for example teeth whitening and insurance. Avoid personal identifiers, symptoms, and private medical history in topic labels. For a handoff, classify handoffReason as administrative only for routine administrative questions such as insurance or payment. Use staff_requested, clinical, existing_booking, or other as appropriate. When the visitor requests a human or raises a clinical or urgent concern, use the corresponding reason even if an administrative topic is also present.
+Answer the visitor’s question first. Questions about a service, results, cost, duration, or hours can be signs of interest. When they are, offer a concrete booking next step and ask one brief question about which day or time suits them. If the visitor is choosing between treatments, offer a consultation if the clinic provides one. Explain differences only where the approved facts support them. Leave personal suitability and treatment recommendations to the clinic team. Keep treatment duration, clinic hours, and appointment availability distinct.
+If the visitor says “Ok” or “yes” after a booking invitation, use the prior reply and known service to continue. Ask for the missing booking detail and keep intent answer while clarifying. A bare acknowledgement without an agreed preference is not permission to create a booking request. If they decline or are just browsing, respect that and stop nudging. Avoid pressure, guarantees, and invented urgency.
+For booking requests, collect the service and a preferred day and clock time. If they give a window such as Thursday afternoon, ask which time in that window works for them. If they explicitly prefer a range or say they are flexible, pass that preference to the team. Preserve the known service and scheduling preference in service and requestedTime across turns. Use booking only when the visitor clearly wants to request an appointment and has given a service and a specific preferred day and time or explicitly opted for flexibility. Use the visitor’s requested wording and never invent a date, time, or availability. If the clinic’s booking mode is information, direct the visitor to the clinic team for appointments.
+A booking is a request for staff confirmation. Use handoff for a human request, clinical or urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history. If urgent, direct them to local emergency services.
+${awaitingStaff ? `Staff are still handling an administrative question. Continue only if the visitor explicitly starts or continues a new appointment request. Use booking_question to ask for the missing service, day or time, and booking once the appointment preference is complete. Acknowledge that the earlier question is with staff if useful. If the visitor only acknowledges, repeats the staff question, declines, or wants a person, use wait with an empty reply. Never claim that the earlier question is resolved.` : ""}
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
             ...(previous ? [{ role: "assistant", content: previous.reply }] : []),
             { role: "user", content: JSON.stringify({
               priorService: previous?.service || "", priorRequestedTime: previous?.requestedTime || "",
+              priorTopics: previous?.topics || [],
               message: text.slice(0, 2000)
             }) }
           ]
         })
       });
-      if (!result.ok) return fallback;
+      if (!result.ok) return awaitingStaff ? null : fallback;
       const data = await result.json();
       const draft = JSON.parse(data.choices?.[0]?.message?.content || "");
       const service = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
       const requestedTime = typeof draft.requestedTime === "string" ? draft.requestedTime.trim().slice(0, 100) : "";
-      if (!["answer", "booking", "handoff"].includes(draft.intent) ||
+      if (awaitingStaff && !["booking_question", "booking"].includes(draft.intent)) return null;
+      const topics = normalizeTopics([
+        ...(Array.isArray(draft.topics) && draft.topics.length ? draft.topics : [service]),
+        ...(previous?.topics || [])
+      ]);
+      if (!(awaitingStaff ? ["booking_question", "booking"] : ["answer", "booking", "handoff"]).includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim() ||
-          (draft.intent === "booking" && (!service || !requestedTime))) return fallback;
+          (draft.intent === "booking" && (!service || !requestedTime))) return awaitingStaff ? null : fallback;
       if (draft.intent === "booking" && facts?.bookingMode === "information") {
         return { intent: "answer", reply: "The clinic team handles appointments. Please contact them to request a time.",
-          service, requestedTime: "" };
+          service, requestedTime: "", topics };
       }
       const reply = draft.intent === "booking"
         ? "I’ve passed your booking request to the clinic team. They’ll confirm the appointment with you here."
         : draft.reply.trim().slice(0, 900);
-      return { intent: draft.intent, reply, service, requestedTime };
+      const replyDraft = { intent: draft.intent === "booking_question" ? "answer" : draft.intent, reply, service, requestedTime, topics };
+      if (draft.intent === "handoff") {
+        replyDraft.handoffReason = ["administrative", "staff_requested", "clinical", "existing_booking"]
+          .includes(draft.handoffReason) ? draft.handoffReason : "other";
+      }
+      return replyDraft;
     } catch {
-      return fallback;
+      return awaitingStaff ? null : fallback;
     }
   }
 
@@ -171,18 +212,31 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
     if (!turn) {
       const previous = await ledger.recentMessengerTurn(conversationKey);
       if (previous && Date.parse(previous.received_at) > received) return;
-      if (previous?.case_key && await ledger.messengerCaseOpen(route, previous.case_key)) return;
-      const context = previous && !previous.case_key && Date.parse(previous.received_at) > now() - day
-        ? previous.draft : null;
+      const pendingHandoffKey = previous?.draft?.pendingHandoffKey ||
+        (previous?.draft?.intent === "handoff" ? previous.case_key : null);
+      if (previous?.case_key && previous.case_key !== pendingHandoffKey &&
+          await openCaseStatus(ledger, route, previous.case_key) !== "closed") return;
+      const handoffStatus = await openCaseStatus(ledger, route, pendingHandoffKey);
+      const awaitingStaff = handoffStatus !== "closed";
+      if (awaitingStaff && (handoffStatus !== "unclaimed" ||
+          !administrativeHandoff(previous.draft))) return;
+      const recent = previous && Date.parse(previous.received_at) > now() - day;
+      const context = recent && (!previous.case_key || awaitingStaff)
+        ? { ...previous.draft, topics: previous.draft.topics || normalizeTopics([previous.draft.service]) } : null;
       const message = await commentPilot?.messageContext({ pageId, route, text, received,
         previousSource: previous?.draft?.commentSource }) || { text };
+      if (awaitingStaff && (hasAttachment || !message.text)) return;
       let draft = fallback;
-      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text, route.location.messenger_facts);
+      if (!hasAttachment && message.text) {
+        draft = await draftReply(page, context, message.text, route.location.messenger_facts, awaitingStaff);
+        if (!draft) return;
+      }
       if (!hasAttachment && !message.text && message.source) {
         draft = { intent: "answer", service: "", requestedTime: "",
           reply: "Thanks for messaging us about our Facebook post. How can we help?" };
       }
       if (message.source) draft = { ...draft, commentSource: message.source };
+      if (awaitingStaff) draft = { ...draft, pendingHandoffKey, handoffReason: "administrative" };
       turn = await ledger.prepareMessengerTurn({
         event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
         draft, case_key: draft.intent === "answer" ? null : outcomeKey("clinic_messenger_case", eventKey)
@@ -200,6 +254,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       details: {
         pageId, ...(testId ? { demo: true, messengerSetupTestId: testId } : { senderId }),
         service: turn.draft.service, requestedTime: turn.draft.requestedTime,
+        ...(turn.draft.topics?.length ? { topics: turn.draft.topics } : {}),
         ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
         ...(intent === "booking" ? { bookingId: key } : {})
       },
@@ -220,6 +275,9 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       await ledger.updateMessengerTurn(eventKey, turn.state, "needs_review", key);
       return;
     }
+    // A staff member may have taken over while the model was working.
+    const handoffKey = turn.draft.pendingHandoffKey;
+    if (handoffKey && await openCaseStatus(ledger, route, handoffKey) === "claimed") return;
     if (turn.case_key && !testId) await saveCase(turn.case_key, turn.draft.intent);
     if (received <= now() - day) return;
     if (!await ledger.updateMessengerTurn(eventKey, "prepared", "sending")) {

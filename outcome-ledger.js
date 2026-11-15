@@ -230,13 +230,13 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return row?.token_ciphertext ?? null;
   }
 
-  async function messengerCaseOpen(route, key) {
+  async function messengerCaseStatus(route, key) {
     const params = new URLSearchParams({
       select: "action", event_key: `eq.${key}`, account_id: `eq.${route.account_id}`,
       location_id: `eq.${route.location_id}`, limit: "1"
     });
     const [row] = await database(`clinic_followup_states?${params}`);
-    return !["handled", "booked"].includes(row?.action);
+    return row?.action ?? null;
   }
 
   function commentDraftPath(route, postId, filters) {
@@ -372,7 +372,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,
     saveMessengerCredential, messengerCredential, saveMessengerFacts,
-    messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
+    messengerCaseStatus, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
 
 module.exports = { outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger };
