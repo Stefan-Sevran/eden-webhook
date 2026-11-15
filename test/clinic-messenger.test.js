@@ -17,7 +17,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture(commentConfig, readSetupTest) {
+function fixture(commentConfig, readSetupTest, modelReply) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
@@ -63,7 +63,7 @@ function fixture(commentConfig, readSetupTest) {
         assert.ok(body.messages[0].content.includes(route.location.messenger_facts ?
           JSON.stringify(route.location.messenger_facts) : "Open 9–5"));
         const input = JSON.parse(body.messages.at(-1).content);
-        const draft = input.message === "Saturday please" ?
+        const draft = modelReply ? modelReply(input) : input.message === "Saturday please" ?
           { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedTime: "Saturday" } :
           { intent: "answer", reply: "We open at 9. What day works for you?", service: "Braces", requestedTime: "" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(draft) } }] });
@@ -167,6 +167,26 @@ test("only a verified binding receives replies and a conversation creates one bo
   f.disconnect();
   await messenger.processPayload(payload("unapproved", "Hi", timestamp + 900));
   assert.equal(f.sends.length, 2);
+});
+
+test("Messenger carries the requested day into the time clarification and books one specific request", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message === "I want a cleaning Thursday afternoon") {
+      return { intent: "answer", reply: "What time on Thursday afternoon works for you?",
+        service: "Cleaning", requestedTime: "Thursday afternoon" };
+    }
+    assert.equal(input.priorService, "Cleaning");
+    assert.equal(input.priorRequestedTime, "Thursday afternoon");
+    return { intent: "booking", reply: "The team will confirm the time.",
+      service: "Cleaning", requestedTime: "Thursday at 3 pm" };
+  });
+  const messenger = f.make();
+  await messenger.processPayload(payload("afternoon", "I want a cleaning Thursday afternoon"));
+  assert.match(f.modelInputs[0].messages[0].content, /preferred day and clock time/);
+  assert.equal(f.cases.size, 0);
+  await messenger.processPayload(payload("specific-time", "3 pm", timestamp + 500));
+  assert.equal(f.cases.size, 1);
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday at 3 pm");
 });
 
 test("one connected post produces review-only drafts and tags a later Messenger booking", async () => {
