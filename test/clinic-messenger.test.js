@@ -21,6 +21,7 @@ function fixture(commentConfig, readSetupTest, modelReply) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
+  const caseStatuses = new Map();
   const ledger = {
     async messengerLocation(id, config) {
       assert.equal(id, pageId); assert.equal(config.locationId, locationId);
@@ -31,7 +32,7 @@ function fixture(commentConfig, readSetupTest, modelReply) {
     async recentMessengerTurn(key) {
       return [...turns.values()].reverse().find(turn => turn.conversation_key === key);
     },
-    async messengerCaseOpen() { return !closed; },
+    async messengerCaseStatus(_route, key) { return closed ? "handled" : caseStatuses.get(key) || null; },
     async commentDraft(candidate, postId, code) {
       return [...cases.values()].some(event => event.kind === "comment.draft" &&
         event.account_id === candidate.account_id && event.location_id === candidate.location_id &&
@@ -80,7 +81,7 @@ function fixture(commentConfig, readSetupTest, modelReply) {
       return sendFails ? new Response(null, { status: 503 }) : Response.json({ message_id: "sent" });
     }
   });
-  return { make, turns, cases, sends, modelInputs, route, commentPilot,
+  return { make, turns, cases, sends, modelInputs, route, commentPilot, caseStatuses,
     disconnect: () => { connected = false; }, close: () => { closed = true; },
     failSend: () => { sendFails = true; } };
 }
@@ -219,6 +220,85 @@ test("Messenger carries whitening interest forward after a brief acknowledgement
   const [booking] = f.cases.values();
   assert.equal(booking.status, "AWAITING_CLINIC");
   assert.equal(booking.details.requestedTime, "Thursday at 3 pm");
+});
+
+test("insurance handoff preserves topics and lets an unclaimed thread collect a new booking", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message === "Can I learn about whitening?") return {
+      intent: "answer", reply: "I can help with that.", service: "Teeth whitening", topics: ["Teeth whitening"]
+    };
+    if (input.message === "Does insurance cover it?") return {
+      intent: "handoff", handoffReason: "administrative", reply: "I’ll ask our staff about insurance.",
+      service: "Insurance inquiries", topics: ["Insurance inquiries", "insurance inquiries"]
+    };
+    assert.ok(input.priorTopics.includes("Teeth whitening"));
+    assert.ok(input.priorTopics.includes("Insurance inquiries"));
+    if (input.message === "Ok") return { intent: "wait", reply: "" };
+    if (input.message === "Could I book a whitening consultation?") return {
+      intent: "booking_question", reply: "What day and time would work for the consultation?",
+      service: "Whitening consultation", topics: ["Teeth whitening", "Insurance inquiries"]
+    };
+    return { intent: "booking", reply: "I will pass that along.", service: "Whitening consultation",
+      requestedTime: "Thursday at 3 pm", topics: ["Teeth whitening", "Insurance inquiries"] };
+  });
+  const messenger = f.make();
+  await messenger.processPayload(payload("whitening", "Can I learn about whitening?"));
+  await messenger.processPayload(payload("insurance", "Does insurance cover it?", timestamp + 200));
+  const [handoff] = f.cases.values();
+  assert.equal(handoff.kind, "inquiry.followup_needed");
+  assert.deepEqual(handoff.details.topics, ["Insurance inquiries", "Teeth whitening"]);
+  await messenger.processPayload(payload("acknowledge", "Ok", timestamp + 300));
+  assert.equal(f.sends.length, 2);
+  await messenger.processPayload(payload("new-request", "Could I book a whitening consultation?", timestamp + 400));
+  assert.equal(f.cases.size, 1);
+  assert.match(f.modelInputs.at(-1).messages[0].content, /Staff are still handling an administrative question/);
+  assert.match(f.sends.at(-1).message.text, /What day and time/);
+  const time = payload("requested-time", "Thursday at 3 pm", timestamp + 600);
+  await messenger.processPayload(time);
+  await f.make().processPayload(time);
+  assert.equal(f.cases.size, 2);
+  const booking = [...f.cases.values()].find(event => event.kind === "booking.requested");
+  assert.equal(booking.details.requestedTime, "Thursday at 3 pm");
+  assert.deepEqual(booking.details.topics, ["Teeth whitening", "Insurance inquiries"]);
+  assert.equal(f.sends.length, 4);
+});
+
+test("claimed, clinical, and human-requested handoffs keep the follow-up with staff", async () => {
+  for (const reason of ["administrative", "clinical", "staff_requested"]) {
+    const f = fixture(null, null, () => ({
+      intent: "handoff", handoffReason: reason,
+      reply: "A member of staff will help you.", service: "Insurance inquiries"
+    }));
+    const messenger = f.make();
+    await messenger.processPayload(payload("handoff", "Could a staff member help?"));
+    if (reason === "administrative") f.caseStatuses.set([...f.cases.keys()][0], "claimed");
+    await messenger.processPayload(payload("after-handoff", "Could I book a consultation?", timestamp + 400));
+    assert.equal(f.modelInputs.length, 1, reason);
+    assert.equal(f.sends.length, 1, reason);
+    assert.equal(f.cases.size, 1, reason);
+  }
+});
+
+test("previous insurance handoffs can ask about a booking without reopening a staff claim", async () => {
+  const f = fixture(null, null, () => ({
+    intent: "booking_question", reply: "What day and time work for the consultation?",
+    service: "Whitening consultation", topics: ["Teeth whitening", "Insurance inquiries"]
+  }));
+  const { outcomeKey } = require("../outcome-ledger");
+  const thread = outcomeKey("clinic_messenger_thread", accountId, locationId, pageId, sender);
+  f.turns.set("previous", {
+    conversation_key: thread, received_at: new Date(timestamp).toISOString(),
+    case_key: "insurance-case", state: "sent",
+    draft: { intent: "handoff", service: "insurance inquiries", reply: "I’ll ask staff about insurance." }
+  });
+  const messenger = f.make();
+  await messenger.processPayload(payload("new-date", "Could I book a consultation?", timestamp + 200));
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.cases.size, 0);
+  f.caseStatuses.set("insurance-case", "claimed");
+  await messenger.processPayload(payload("patient-time", "Thursday at 3 pm", timestamp + 400));
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.cases.size, 0);
 });
 
 test("one connected post produces review-only drafts and tags a later Messenger booking", async () => {
