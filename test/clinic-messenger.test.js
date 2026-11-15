@@ -115,7 +115,7 @@ test("a signed Messenger setup test becomes one sample only after Meta accepts t
   assert.equal(f.sends.length, 1);
   const reply = f.sends[0].message.text;
   const [instruction, link] = reply.split("\n\n");
-  assert.equal(instruction, "Eden received your test message. Open your setup page link (below) and tap Claim test inquiry to finish setup.");
+  assert.equal(instruction, "Eden received your test message and replied successfully. Open your setup page below to see the result.");
   const setupUrl = new URL(link);
   assert.equal(setupUrl.origin + setupUrl.pathname, "https://clinicnet.live/clinic/");
   assert.deepEqual(Object.fromEntries(setupUrl.searchParams), { messengerTest: "setup-one", account: accountId, location: locationId });

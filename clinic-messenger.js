@@ -164,7 +164,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       turn = await ledger.prepareMessengerTurn({
         event_key: eventKey, conversation_key: conversationKey, received_at: new Date(received).toISOString(),
         draft: { intent: "booking", service: "Sample consultation", requestedTime: "Example weekday afternoon",
-          reply: "Eden received your test message. Open your setup page link (below) and tap Claim test inquiry to finish setup.\n\n" + setupUrl.href },
+          reply: "Eden received your test message and replied successfully. Open your setup page below to see the result.\n\n" + setupUrl.href },
         case_key: outcomeKey("clinic_messenger_case", eventKey)
       });
     }
