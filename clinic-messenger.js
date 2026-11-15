@@ -10,6 +10,17 @@ const fallback = {
   reply: "I’ll ask the clinic team to help here. They’ll follow up as soon as they can."
 };
 
+function requestedTimeFromDraft(value, text, priorTime = "") {
+  const time = typeof value === "string" ? value.trim().slice(0, 100) : "";
+  const source = text + " " + priorTime;
+  const years = time.match(/\b(?:19|20|21)\d{2}\b/g) || [];
+  if (years.every(year => new RegExp("\\b" + year + "\\b").test(source))) return time;
+
+  // Preserve the exact date and time the visitor typed when the model adds a year.
+  const literal = /\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+at)?\s+(?:\d{1,2}:\d{2}(?:\s*[ap]m)?|\d{1,2}\s*[ap]m)\b/i;
+  return text.match(literal)?.[0] || "";
+}
+
 function parseClinicPages(raw, edenPageId) {
   if (!raw) return new Map();
   const config = JSON.parse(raw);
@@ -96,7 +107,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return (await readSubscription()).includes("messages");
   }
 
-  async function draftReply(page, previous, text, facts) {
+  async function draftReply(page, previous, text, facts, timeZone, received) {
     if (!openaiKey) return fallback;
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
@@ -109,6 +120,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
           messages: [
             { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Answer using the approved facts only. Do not give medical advice, promise availability, confirm appointments, ask for medical details, or repeat sensitive patient details. Offer one helpful next step in the visitor's language.
 Return JSON with intent (answer, booking, or handoff), reply, service, and requestedTime. For questions or tentative interest, answer first and ask one brief question. Use booking only when the person asks to book and has provided a service and preferred time or day, including when they say they are flexible. A booking is a request for staff confirmation. Use handoff for a human request, clinical/urgent issues, changes to existing bookings, or issues you cannot resolve. Keep service and requestedTime brief and exclude names and health history. If urgent, direct them to local emergency services.
+Preserve the visitor’s scheduling wording in requestedTime. Keep exact weekdays, dates and clock times from this or the prior message. Leave the year out unless the visitor gave it. Use plain language and never convert the preference into an ISO timestamp. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
             ...(previous ? [{ role: "assistant", content: previous.reply }] : []),
@@ -123,7 +135,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const data = await result.json();
       const draft = JSON.parse(data.choices?.[0]?.message?.content || "");
       const service = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
-      const requestedTime = typeof draft.requestedTime === "string" ? draft.requestedTime.trim().slice(0, 100) : "";
+      const requestedTime = requestedTimeFromDraft(draft.requestedTime, text, previous?.requestedTime);
+      if (draft.intent === "booking" && draft.requestedTime && !requestedTime) {
+        return { intent: "answer", reply: "Could you confirm the date and time you’d prefer?", service, requestedTime };
+      }
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim() ||
           (draft.intent === "booking" && (!service || !requestedTime))) return fallback;
@@ -132,7 +147,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
           service, requestedTime: "" };
       }
       const reply = draft.intent === "booking"
-        ? "I’ve passed your booking request to the clinic team. They’ll confirm the appointment with you here."
+        ? "Thanks for reaching out! I’ve shared your appointment request with our clinic team. They’ll reply here to confirm the time."
         : draft.reply.trim().slice(0, 900);
       return { intent: draft.intent, reply, service, requestedTime };
     } catch {
@@ -177,7 +192,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const message = await commentPilot?.messageContext({ pageId, route, text, received,
         previousSource: previous?.draft?.commentSource }) || { text };
       let draft = fallback;
-      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text, route.location.messenger_facts);
+      if (!hasAttachment && message.text) draft = await draftReply(page, context, message.text, route.location.messenger_facts, route.location.timezone, received);
       if (!hasAttachment && !message.text && message.source) {
         draft = { intent: "answer", service: "", requestedTime: "",
           reply: "Thanks for messaging us about our Facebook post. How can we help?" };

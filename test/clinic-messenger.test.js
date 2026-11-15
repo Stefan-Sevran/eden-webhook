@@ -17,7 +17,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture(commentConfig, readSetupTest) {
+function fixture(commentConfig, readSetupTest, modelDraft) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, closed = false, sendFails = false;
@@ -63,7 +63,7 @@ function fixture(commentConfig, readSetupTest) {
         assert.ok(body.messages[0].content.includes(route.location.messenger_facts ?
           JSON.stringify(route.location.messenger_facts) : "Open 9–5"));
         const input = JSON.parse(body.messages.at(-1).content);
-        const draft = input.message === "Saturday please" ?
+        const draft = modelDraft ? modelDraft(input) : input.message === "Saturday please" ?
           { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedTime: "Saturday" } :
           { intent: "answer", reply: "We open at 9. What day works for you?", service: "Braces", requestedTime: "" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(draft) } }] });
@@ -152,7 +152,7 @@ test("only a verified binding receives replies and a conversation creates one bo
   assert.equal(f.sends.length, 2);
   assert.equal(f.modelInputs.length, 2);
   assert.equal(f.sends[1].messaging_type, "RESPONSE");
-  assert.match(f.sends[1].message.text, /confirm the appointment with you/);
+  assert.match(f.sends[1].message.text, /They’ll reply here to confirm the time/);
   assert.equal(f.cases.size, 1);
   const [request] = f.cases.values();
   assert.equal(request.channel, "facebook_messenger");
@@ -261,4 +261,24 @@ test("Page verification logs only a fixed hint for a rejected app secret proof",
   await assert.rejects(messenger.verifyPage(pageId, page), {
     message: "Page token identity check: Meta request failed: HTTP 400, code 100, subcode none, app secret proof rejected"
   });
+});
+
+test("Messenger recovers the visitor’s original date and time when the model invents a year", async () => {
+  const f = fixture(null, null, () => ({
+    intent: "booking", reply: "Untrusted wording", service: "Dental cleaning", requestedTime: "2023-11-19T15:15:00"
+  }));
+  f.route.location.timezone = "Asia/Manila";
+  await f.make().processPayload(payload("exact-time", "Hi, could I book a dental cleaning for Thursday, November 19 at 3:15 PM Cebu time?"));
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 19 at 3:15 PM");
+  assert.match(f.modelInputs[0].messages[0].content, /Asia\/Manila/);
+  assert.match(f.sends[0].message.text, /Thanks for reaching out!/);
+});
+
+test("Messenger asks for clarification when an invented year cannot be grounded", async () => {
+  const f = fixture(null, null, () => ({
+    intent: "booking", reply: "Untrusted wording", service: "Dental cleaning", requestedTime: "2023-11-19T15:15:00"
+  }));
+  await f.make().processPayload(payload("ungrounded-date", "Can I book a cleaning next Thursday?"));
+  assert.equal(f.cases.size, 0);
+  assert.match(f.sends[0].message.text, /confirm the date and time/);
 });
