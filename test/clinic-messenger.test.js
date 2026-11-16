@@ -424,3 +424,39 @@ test("Messenger books a different approved service when the visitor clearly choo
   assert.equal(request.details.service, "Checkup");
   assert.equal(request.details.requestedTime, "Thursday at 4:15 PM");
 });
+
+test("an unlisted service stays in intake until the visitor supplies an exact time", async () => {
+  const f = fixture(null, null, input => {
+    if (!input.priorService) {
+      return { intent: "handoff", handoffReason: "service_verification", service: "Cleaning", requestedDay: "Thursday",
+        reply: "I’ll check with the team. Can I help with anything else?" };
+    }
+    assert.equal(input.priorPreference.requestedDay, "Thursday");
+    return { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM",
+      reply: "The team will check that for you." };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  f.route.location.messenger_facts = { services: "Checkup and consultation", bookingMode: "request" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("incomplete-cleaning", "I’m a bit nervous. Could I come in for a cleaning Thursday afternoon?"));
+  assert.equal(f.cases.size, 0);
+  assert.match(f.sends[0].message.text, /ask the team about cleaning.*What time works/);
+  await messenger.processPayload(payload("completed-cleaning", "Can I simply book now 4:15 PM Cebu time?", timestamp + 800));
+  assert.equal(f.cases.size, 1);
+  const [request] = f.cases.values();
+  assert.equal(request.kind, "inquiry.followup_needed");
+  assert.equal(request.details.service, "Cleaning");
+  assert.equal(request.details.requestedTime, "Thursday, November 12, 2026 at 4:15 PM");
+});
+
+test("a request for a person still hands off immediately for an unlisted service", async () => {
+  const f = fixture(null, null, () => ({
+    intent: "handoff", handoffReason: "staff_requested", service: "Cleaning", requestedDay: "Thursday",
+    reply: "I’ll ask someone from the clinic to help you here."
+  }));
+  f.route.location.messenger_facts = { services: "Checkup and consultation", bookingMode: "request" };
+  await f.make().processPayload(payload("person-requested", "Could I speak to someone about a cleaning Thursday?"));
+  assert.equal(f.cases.size, 1);
+  assert.equal([...f.cases.values()][0].kind, "inquiry.followup_needed");
+  assert.match(f.sends[0].message.text, /ask someone from the clinic/);
+});
