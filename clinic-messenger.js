@@ -194,11 +194,11 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
           model: "gpt-4o-mini", store: false, response_format: { type: "json_object" },
           max_tokens: 500,
           messages: [
-            { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Use only the approved facts below. Never diagnose, prescribe, promise a slot, or say an appointment is confirmed. For urgent concerns direct the visitor to local emergency services and hand off. Hand off clinical questions, staff requests, changes to existing appointments, and issues outside the approved facts that need staff. Do not gather or repeat medical history.
+            { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Use only the approved facts below. Never diagnose, prescribe, promise a slot, or say an appointment is confirmed. For urgent concerns direct the visitor to local emergency services and hand off. Hand off clinical questions, explicit requests for a person, and changes to existing appointments. A visitor saying they are nervous is a cue for reassurance. Do not gather or repeat medical history.
 ${conversationalStyle}
 
-Return JSON with intent (answer, booking, or handoff), reply, service, serviceSelected, serviceNeedsCheck, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
-Service is the service the visitor actually wants. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, collect their preferred day and time as usual. Once the request is complete, use booking so the server can route it for staff verification. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
+Return JSON with intent (answer, booking, or handoff), reply, handoffReason (clinical, staff_requested, existing_appointment, service_verification, or other), service, serviceSelected, serviceNeedsCheck, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
+Service is the service the visitor actually wants. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, use answer while collecting their preferred day and exact time. Service verification alone must keep the conversation open while appointment details are missing. For “Could I come in for a cleaning Thursday afternoon?” when cleaning is unlisted, a good reply is “We can take it at your pace. I can ask the team about a cleaning. What time Thursday afternoon works for you?” Carry Thursday forward after they give the clock time. Once the request is complete, use booking so the server can route it for staff verification. Reserve handoffReason service_verification for an appointment request about an unlisted service. Use the other handoff reasons for clinical questions, requests for a person, or other issues. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
 For requestedDay and requestedClock, quote the visitor's words as separate fields, for example "Thursday, November 19" and "3:15 PM". Carry forward known details from priorPreference if they still apply; the latest correction wins. Quote day and time only, excluding names and other private details. Keep the year exactly as supplied. Leave AM or PM out until the visitor supplies it. Use flexibility only for a short direct quote like "I'm flexible" or "any time works", never for a partial preference or a tentative reply. If the date, time zone or time is ambiguous or the visitor named a different time zone, ask what clinic-local date and time they prefer. Treat "next Thursday" and similar phrases as ambiguous until the visitor specifies the calendar date. Return empty strings for unknown or withdrawn details. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
@@ -230,11 +230,13 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const request = { service, serviceNeedsCheck, ...bookingPreference(draft, text, previous, timeZone, received) };
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim()) return fallback;
-      if (draft.intent === "booking" && facts?.bookingMode === "information") {
+      const intake = draft.intent === "booking" ||
+        (draft.intent === "handoff" && draft.handoffReason === "service_verification" && serviceNeedsCheck);
+      if (intake && facts?.bookingMode === "information") {
         return { intent: "answer", reply: "I can help with clinic questions. Please contact the clinic team to request an appointment.",
           service, requestedTime: "" };
       }
-      if (draft.intent === "booking") {
+      if (intake) {
         if (deferring.test(text.trim())) {
           return { intent: "answer", reply: "Of course. Take your time.", ...request };
         }
@@ -242,8 +244,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         const ambiguousDate = /^next /i.test(requestedDay);
         const needsDate = !requestedDay || ambiguousDate;
         if (!service || ambiguousDate || (!flexibility && (needsDate || !requestedClock))) {
-          const reply = !service ? "What would you like to come in for?" :
+          const question = !service ? "What would you like to come in for?" :
             needsDate ? "What date works for you?" : "What time works best that day?";
+          const checking = serviceNeedsCheck && !previous?.serviceNeedsCheck;
+          const reply = checking ? "I can ask the team about " + service.toLowerCase() + ". " + question : question;
           return { intent: "answer", reply, ...request };
         }
         if (serviceNeedsCheck) {
