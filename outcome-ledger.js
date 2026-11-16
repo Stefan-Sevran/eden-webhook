@@ -291,11 +291,12 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return row;
   }
 
-  async function recentMessengerTurn(conversationKey, { caseSince } = {}) {
+  async function recentMessengerTurn(conversationKey, { caseSince, withPreference = false } = {}) {
     const params = new URLSearchParams({
       conversation_key: `eq.${conversationKey}`,
       order: "received_at.desc,updated_at.desc,event_key", limit: "1",
-      ...(caseSince ? { case_key: "not.is.null", received_at: `gte.${caseSince}` } : {})
+      ...(caseSince ? { case_key: "not.is.null", received_at: `gte.${caseSince}` } : {}),
+      ...(withPreference ? { "draft->>requestedTime": "neq." } : {})
     });
     const [row] = await database(`clinic_messenger_turns?${params}`);
     return row;

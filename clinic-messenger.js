@@ -36,6 +36,10 @@ const flexiblePreference = /^(?:i(?:['’]m| am) flexible|(?:i am )?flexible|any
 const dayMention = new RegExp("\\b(" + dayPattern + ")(?![\\w-])", "gi");
 const clockMention = new RegExp("(?<![\\w:])" + clockPattern + "(?![\\w:])", "i");
 const statedEarlier = "(?:i already (?:mentioned|said)\\s+)?";
+const explicitTimeChange = new RegExp("^(?:(?:can|could|may|would) (?:i|we|you) |please )?" +
+  "(?:please )?(?:move|change|reschedule|push) (?:(?:it|that|this|my appointment|our appointment|the booking) )?to " +
+  "(" + clockPattern + ")(?:\\s+((?:cebu|manila|philippine|ph) time))?[.!?\\s]*$", "i");
+const approveNewRequest = /^(?:yes(?:,? please)?|please do|go ahead|send it)[.!\s]*$/i;
 const statedDay = new RegExp("^" + statedEarlier + "(" + dayPattern + ")[.!?\\s]*$", "i");
 const statedClock = new RegExp("^" + statedEarlier + "(?:at\\s+)?(" + clockPattern +
   ")(?:\\s+((?:cebu|manila|philippine|ph) time))?(?:\\s+(?:please|ok(?:ay)?))?[.!?\\s]*$", "i");
@@ -56,6 +60,48 @@ function bookingReply(text, timeZone) {
     requestedDay: text.trim().match(statedDay)?.[1] || "",
     requestedClock: !zone || timeZone === "Asia/Manila" ? clock || "" : ""
   };
+}
+
+function explicitChangedClock(text, timeZone) {
+  const [, clock, zone] = text.trim().match(explicitTimeChange) || [];
+  return !zone || timeZone === "Asia/Manila" ? clock || "" : "";
+}
+
+function concreteChangeDay(label, timeZone, received) {
+  const local = calendarDay(label, timeZone, received);
+  if (!local || !dayPreference.test(local)) return "";
+  let dated = local;
+  if (!/\b\d{4}\b/.test(local)) {
+    if (!new RegExp("^" + dateWithMonth + "$|^(?:" + weekdayNames + "),?\\s+" + dateWithMonth + "$", "i").test(local)) return "";
+    const today = calendarDay("today", timeZone, received);
+    const year = Number(today.match(/\b\d{4}$/)?.[0]);
+    if (!year) return "";
+    dated = local + ", " + year;
+    if (Date.parse(dated + " UTC") < Date.parse(today + " UTC")) dated = local + ", " + (year + 1);
+  }
+  const unixDay = Date.parse(dated + " UTC");
+  if (!Number.isFinite(unixDay)) return "";
+  const date = new Date(unixDay);
+  const iso = dated.match(/^\d{4}-\d{2}-\d{2}$/);
+  if (iso && date.toISOString().slice(0, 10) !== iso[0]) return "";
+  const weekday = weekdays.findIndex(names => new RegExp("^(?:" + names + ")\\b", "i").test(dated));
+  if (weekday !== -1 && weekday !== date.getUTCDay()) return "";
+  const dayNumber = dated.match(new RegExp("(?<![0-9])(" + dayOfMonth + ")\\s+(?:" + monthNames + ")|(?:" +
+    monthNames + ")\\s+(" + dayOfMonth + ")(?![0-9])", "i"));
+  if (dayNumber && parseInt(dayNumber[1] || dayNumber[2], 10) !== date.getUTCDate()) return "";
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" }).format(date);
+}
+
+function savedRequestDay(submitted, timeZone, received) {
+  const appointmentAt = Date.parse(submitted?.staffAction?.appointment_at);
+  if (Number.isFinite(appointmentAt) && timeZone) return calendarDay("today", timeZone, appointmentAt);
+  const preference = submitted?.details.requestedTime;
+  const label = typeof preference === "string" ? preference.split(" at ", 1)[0] : "";
+  return /\b\d{4}\b/.test(label) ? concreteChangeDay(label, timeZone, received) : "";
+}
+
+function staffActionOf(submitted) {
+  return submitted?.staffAction?.recorded_action || submitted?.staffAction?.action;
 }
 
 function quotedPreference(value, message, previous, pattern) {
@@ -288,23 +334,30 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     }
 
     const pending = previous?.pendingAction === action && previous.targetCaseKey === submitted?.event_key;
-    const originalDay = typeof priorDetails.requestedTime === "string" && priorDetails.requestedTime.includes(" at ")
-      ? priorDetails.requestedTime.split(" at ", 1)[0] : "";
-    const appointmentAt = Date.parse(submitted?.staffAction?.appointment_at);
-    const confirmedDay = Number.isFinite(appointmentAt) && timeZone ? calendarDay("today", timeZone, appointmentAt) : "";
-    const verifiedDay = confirmedDay || (dayPreference.test(originalDay) ? originalDay : "");
+    const verifiedDay = savedRequestDay(submitted, timeZone, received);
     const preference = bookingPreference(draft, text, {
       requestedDay: pending ? previous.requestedDay : verifiedDay,
       requestedClock: pending ? previous.requestedClock : "",
       dayAnchor: pending ? previous.dayAnchor : received
     }, timeZone, received, true, bookingReply(text, timeZone));
-    const passed = preference.requestedDay && preference.requestedClock && dateAlreadyPassed(preference, timeZone, received);
-    if (!preference.requestedDay || /^next /i.test(preference.requestedDay) || !preference.requestedClock || passed) {
+    const concreteDay = concreteChangeDay(preference.requestedDay, timeZone, preference.dayAnchor);
+    if (concreteDay) {
+      preference.dayLabel = concreteDay;
+      preference.requestedTime = [concreteDay, preference.requestedClock].filter(Boolean).join(" at ");
+    }
+    const passed = concreteDay && preference.requestedClock && dateAlreadyPassed(preference, timeZone, received);
+    if (!concreteDay || !preference.requestedClock || passed) {
       return { ...anchor, ...preference, intent: "answer", pendingAction: action,
         ...(passed ? { requestedDay: "", requestedClock: "" } : {}),
         reply: passed ? "That time has already passed. What other day and time would work?" :
-          !preference.requestedDay || /^next /i.test(preference.requestedDay)
-            ? "What date would you like instead?" : "What time would work on that day?" };
+          !concreteDay
+            ? "What calendar date should I use" + (preference.requestedClock ? " for " + preference.requestedClock : "") + "?"
+            : "What time would work on that day?" };
+    }
+    if (["handled", "cancelled"].includes(staffActionOf(submitted))) {
+      return { ...anchor, ...preference, requestedDay: concreteDay, requestedTime: "", intent: "answer", pendingAction: "new_after_closed",
+        reply: "The earlier request is closed. Would you like me to send a new request for " +
+          preference.requestedTime + "?" };
     }
     if (preference.requestedTime === priorDetails.requestedTime) {
       return { intent: "answer", reply: "The clinic team already has that requested time." };
@@ -314,6 +367,28 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
   }
 
   async function draftReply(page, previous, history, text, facts, timeZone, received, submitted) {
+    const changedClock = explicitChangedClock(text, timeZone);
+    const stated = bookingReply(text, timeZone);
+    if (changedClock || (previous?.pendingAction === "change_time" && (stated.requestedDay || stated.requestedClock))) {
+      return appointmentFollowup({ requestAction: "change_time", requestedClock: changedClock },
+        text, previous, submitted, timeZone, received);
+    }
+    if (previous?.pendingAction === "new_after_closed" && approveNewRequest.test(text.trim()) &&
+        previous.requestedDay && previous.requestedClock && previous.service &&
+        previous.targetCaseKey === submitted?.event_key) {
+      if (facts?.bookingMode === "information") {
+        return { intent: "answer", reply: "Please contact the clinic team to request an appointment." };
+      }
+      const date = calendarDay(previous.requestedDay, timeZone, previous.dayAnchor);
+      const requestedTime = date + " at " + previous.requestedClock;
+      if (dateAlreadyPassed({ dayLabel: date, requestedClock: previous.requestedClock }, timeZone, received)) {
+        return { intent: "answer", reply: "That time has already passed. What other day and time would work?" };
+      }
+      const serviceNeedsCheck = submitted.kind === "inquiry.followup_needed" ||
+        (typeof facts?.services === "string" && facts.services.trim() && !mentionsService(facts.services, previous.service));
+      return { intent: serviceNeedsCheck ? "handoff" : "booking", service: previous.service, requestedTime,
+        reply: "I’ve sent a new request for " + requestedTime + ". The clinic team will follow up here." };
+    }
     if (!openaiKey) return fallback;
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
@@ -357,7 +432,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
           ]
         })
       });
-      if (!result.ok) return fallback;
+      if (!result.ok) {
+        logger.warn("Clinic Messenger draft request failed", { status: result.status });
+        return fallback;
+      }
       const data = await result.json();
       const draft = JSON.parse(data.choices?.[0]?.message?.content || "");
       const proposedService = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
@@ -369,7 +447,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         (!serviceChanged && previous?.serviceNeedsCheck === true) ||
         (typeof facts?.services === "string" && facts.services.trim() && !mentionsService(facts.services, service))));
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
-          typeof draft.reply !== "string" || !draft.reply.trim()) return fallback;
+          typeof draft.reply !== "string" || !draft.reply.trim()) {
+        logger.warn("Clinic Messenger draft response was incomplete");
+        return fallback;
+      }
       const availableRequest = submitted && (submitted.kind === "booking.requested" || submitted.details.requestedTime);
       const previousFollowup = previous?.lastFollowup;
       const statedPreference = bookingReply(text, timeZone);
@@ -384,8 +465,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const related = appointmentFollowup({ ...draft, requestAction }, text, previous, availableRequest ? submitted :
         requestAction === "follow_up" ? submitted : null, timeZone, received);
       if (related) return related;
-      const staffAction = submitted?.staffAction?.recorded_action || submitted?.staffAction?.action;
-      const priorRequestResolved = ["handled", "cancelled"].includes(staffAction);
+      const priorRequestResolved = ["handled", "cancelled"].includes(staffActionOf(submitted));
       const separateBooking = requestAction === confirmedNewRequest || secondBooking.test(text) ||
         (priorRequestResolved && directBookingRequest.test(text)) ||
         (previous?.newBooking === true && previous?.bookingActive === true);
@@ -448,6 +528,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         ...(previousFollowup && draft.intent === "answer" ? { lastFollowup: previousFollowup } : {}) };
 
     } catch {
+      logger.warn("Clinic Messenger draft could not be processed");
       return fallback;
     }
   }
@@ -489,9 +570,21 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
           caseSince: new Date(received - referenceWindow).toISOString()
         });
       const caseKey = priorCase?.draft?.targetCaseKey || priorCase?.case_key;
-      const submitted = caseKey && await ledger.messengerCase(route, caseKey, pageId, senderId);
+      let submitted = caseKey && await ledger.messengerCase(route, caseKey, pageId, senderId);
       const context = previous && Date.parse(previous.received_at) > received - day
         ? { ...previous.draft, ...(previous.case_key ? { bookingActive: false } : {}) } : null;
+      if (priorCase && submitted?.kind === "inquiry.followup_needed" && !submitted.details.requestedTime &&
+          (explicitChangedClock(text, route.location.timezone) || context?.pendingAction === "change_time")) {
+        const datedTurn = await ledger.recentMessengerTurn(conversationKey, {
+          caseSince: new Date(received - referenceWindow).toISOString(), withPreference: true
+        });
+        const datedKey = datedTurn?.draft?.targetCaseKey || datedTurn?.case_key;
+        if (datedKey) submitted = await ledger.messengerCase(route, datedKey, pageId, senderId);
+      }
+      if (context?.pendingAction === "new_after_closed" && context.targetCaseKey &&
+          context.targetCaseKey !== submitted?.event_key) {
+        submitted = await ledger.messengerCase(route, context.targetCaseKey, pageId, senderId);
+      }
       const history = (recentConversations.get(conversationKey) || [])
         .filter(exchange => exchange.received > received - day);
       const message = await commentPilot?.messageContext({ pageId, route, text, received,
