@@ -290,7 +290,9 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     const pending = previous?.pendingAction === action && previous.targetCaseKey === submitted?.event_key;
     const originalDay = typeof priorDetails.requestedTime === "string" && priorDetails.requestedTime.includes(" at ")
       ? priorDetails.requestedTime.split(" at ", 1)[0] : "";
-    const verifiedDay = dayPreference.test(originalDay) ? originalDay : "";
+    const appointmentAt = Date.parse(submitted?.staffAction?.appointment_at);
+    const confirmedDay = Number.isFinite(appointmentAt) && timeZone ? calendarDay("today", timeZone, appointmentAt) : "";
+    const verifiedDay = confirmedDay || (dayPreference.test(originalDay) ? originalDay : "");
     const preference = bookingPreference(draft, text, {
       requestedDay: pending ? previous.requestedDay : verifiedDay,
       requestedClock: pending ? previous.requestedClock : "",
@@ -341,7 +343,8 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
               submittedRequest: submitted ? {
                 service: submitted.details.service || "",
                 requestedTime: submitted.details.requestedTime || "",
-                previousRequestType: submitted.kind
+                previousRequestType: submitted.kind,
+                staffAction: submitted.staffAction?.recorded_action || submitted.staffAction?.action || ""
               } : null,
               priorServiceNeedsCheck: previous?.serviceNeedsCheck === true,
               priorPreference: {
@@ -381,7 +384,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const related = appointmentFollowup({ ...draft, requestAction }, text, previous, availableRequest ? submitted :
         requestAction === "follow_up" ? submitted : null, timeZone, received);
       if (related) return related;
+      const staffAction = submitted?.staffAction?.recorded_action || submitted?.staffAction?.action;
+      const priorRequestResolved = ["handled", "cancelled"].includes(staffAction);
       const separateBooking = requestAction === confirmedNewRequest || secondBooking.test(text) ||
+        (priorRequestResolved && directBookingRequest.test(text)) ||
         (previous?.newBooking === true && previous?.bookingActive === true);
       if (availableRequest && !separateBooking) {
         if (draft.intent === "booking" || statedPreference.requestedDay || statedPreference.requestedClock) {
