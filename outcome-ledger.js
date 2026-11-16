@@ -195,7 +195,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     const [route] = await database(`clinic_channel_connections?${params}`);
     if (!route) return null;
     const location = new URLSearchParams({
-      select: guidedMessengerSetup ? "alert_email,messenger_facts" : "alert_email",
+      select: guidedMessengerSetup ? "alert_email,timezone,messenger_facts" : "alert_email,timezone",
       id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
     });
     const [row] = await database(`clinic_locations?${location}`);
