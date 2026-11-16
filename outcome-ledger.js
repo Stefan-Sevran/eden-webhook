@@ -237,7 +237,13 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
       "details->>pageId": `eq.${pageId}`, "details->>senderId": `eq.${senderId}`, limit: "1"
     });
     const [row] = await database(`clinic_outcomes?${params}`);
-    return row;
+    if (!row) return null;
+    const scoped = new URLSearchParams({
+      select: "action,recorded_action,appointment_at", event_key: `eq.${eventKey}`,
+      account_id: `eq.${route.account_id}`, location_id: `eq.${route.location_id}`, limit: "1"
+    });
+    const [staffAction] = await database(`clinic_followup_states?${scoped}`);
+    return { ...row, staffAction };
   }
 
   async function amendMessengerRequest(route, pageId, senderId, targetKey, changeKey, draft) {

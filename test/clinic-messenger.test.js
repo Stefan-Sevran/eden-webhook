@@ -20,7 +20,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
 function fixture(commentConfig, readSetupTest, modelDraft) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
-  let connected = true, touched = false, sendFails = false;
+  let connected = true, staffAction, sendFails = false;
   const ledger = {
     async messengerLocation(id, config) {
       assert.equal(id, pageId); assert.equal(config.locationId, locationId);
@@ -35,11 +35,11 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     async messengerCase(route, key, candidatePage, candidateSender) {
       const event = cases.get(key);
       return event?.account_id === route.account_id && event.location_id === route.location_id &&
-        event.details.pageId === candidatePage && event.details.senderId === candidateSender ? event : null;
+        event.details.pageId === candidatePage && event.details.senderId === candidateSender ? { ...event, staffAction } : null;
     },
     async amendMessengerRequest(route, candidatePage, candidateSender, key, changeKey, draft) {
       const event = await this.messengerCase(route, key, candidatePage, candidateSender);
-      if (!event || touched) return false;
+      if (!event || staffAction) return false;
       const changes = event.details.messengerAmendments ||= [];
       if (!changes.includes(changeKey)) {
         changes.push(changeKey);
@@ -97,7 +97,7 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     }
   });
   return { make, turns, cases, sends, modelInputs, route, commentPilot,
-    disconnect: () => { connected = false; }, touch: () => { touched = true; },
+    disconnect: () => { connected = false; }, touch: (action = { action: "claimed" }) => { staffAction = action; },
     failSend: () => { sendFails = true; } };
 }
 
@@ -669,4 +669,18 @@ test("a time change can collect the missing hour on the next message", async () 
   await messenger.processPayload(payload("two-part-clock", "4:30 PM Cebu time.", timestamp + 200));
   assert.equal(f.cases.size, 1);
   assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13 at 4:30 PM");
+});
+
+test("a time-only change after booking uses the day staff actually confirmed", async () => {
+  const f = fixture(null, null, input => input.message.startsWith("Please book")
+    ? { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM", reply: "Request sent." }
+    : { intent: "handoff", requestAction: "change_time", requestedClock: "5 PM", reply: "I can ask the team." });
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("confirmed-root", "Please book cleaning Thursday at 4:15 PM"));
+  f.touch({ action: "booked", appointment_at: "2026-11-13T08:15:00Z" });
+  await messenger.processPayload(payload("confirmed-change", "Could we move it to 5 PM?", timestamp + 500));
+  const [original, change] = f.cases.values();
+  assert.equal(change.details.relatedRequestKey, original.event_key);
+  assert.equal(change.details.requestedTime, "Friday, November 13, 2026 at 5 PM");
 });
