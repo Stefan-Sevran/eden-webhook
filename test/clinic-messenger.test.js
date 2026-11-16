@@ -380,3 +380,47 @@ test("Messenger honors a clear deferral even when a complete preference is on re
   assert.equal(f.cases.size, 0);
   assert.equal(f.sends[1].message.text, "Of course. Take your time.");
 });
+
+test("Messenger keeps the requested cleaning when a time-only reply is mistaken for a checkup choice", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message.includes("nervous")) {
+      return { intent: "answer", reply: "We can take it at your pace. I can ask about a cleaning. What time Thursday afternoon works for you?",
+        service: "Cleaning", requestedDay: "Thursday" };
+    }
+    assert.equal(input.priorService, "Cleaning");
+    assert.equal(input.priorServiceNeedsCheck, true);
+    return { intent: "booking", reply: "You’re booked for a checkup.",
+      service: "Checkup", serviceSelected: true, requestedDay: input.priorPreference.requestedDay, requestedClock: "4:15 PM" };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  f.route.location.messenger_facts = { services: "Dental check-up and consultations", bookingMode: "request" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("cleaning-request", "I'm nervous. Could I come in for a cleaning Thursday afternoon?"));
+  await messenger.processPayload(payload("time-only", "4:15 PM Cebu time ok?", timestamp + 500));
+  assert.match(f.sends[0].message.text, /take it at your pace/);
+  assert.match(f.sends[1].message.text, /check on cleaning.*at 4:15 PM/);
+  assert.doesNotMatch(f.sends[1].message.text, /booked|checkup/);
+  assert.equal(f.cases.size, 1);
+  const [request] = f.cases.values();
+  assert.equal(request.kind, "inquiry.followup_needed");
+  assert.equal(request.details.service, "Cleaning");
+  assert.equal(request.details.requestedTime, "Thursday, November 12, 2026 at 4:15 PM");
+});
+
+test("Messenger books a different approved service when the visitor clearly chooses it", async () => {
+  const f = fixture(null, null, input => {
+    if (!input.priorService) return { intent: "answer", reply: "I can ask the team about a cleaning.",
+      service: "Cleaning", serviceNeedsCheck: true, requestedDay: "Thursday", requestedClock: "4:15 PM" };
+    return { intent: "booking", reply: "I’ll send that to the team.",
+      service: "Checkup", serviceSelected: true, ...input.priorPreference };
+  });
+  f.route.location.messenger_facts = { services: "Dental check-ups and consultations", bookingMode: "request" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("original-service", "Could I request a cleaning Thursday at 4:15 PM?"));
+  await messenger.processPayload(payload("explicit-change", "I'd prefer a check-up.", timestamp + 500));
+  assert.equal(f.cases.size, 1);
+  const [request] = f.cases.values();
+  assert.equal(request.kind, "booking.requested");
+  assert.equal(request.details.service, "Checkup");
+  assert.equal(request.details.requestedTime, "Thursday at 4:15 PM");
+});
