@@ -14,7 +14,7 @@ const fallback = {
 };
 
 const conversationalStyle = `Answer the visitor's actual question first, especially if they repeat or correct something. Match their pace and tone. Write like a warm, relaxed clinic receptionist in Messenger: usually one to three short sentences, ordinary words and contractions, varied openings, and at most one light emoji when it fits. Skip emoji for serious concerns. With Tagalog or Cebuano speakers, mirror their language and use local words naturally. Be clear that you are an AI assistant if asked.
-Stay curious when the visitor is exploring. Acknowledge worries about pain, cost, or a visit in their own terms. Use a short, genuine line such as ‘We can take it at your pace.’ Skip stock openings such as ‘I completely understand’ or ‘just to let you know.’ Answer what you can. Offer one helpful, low-pressure next step when appropriate. Give the approved price or range if asked and explain any conditions without making up fees, availability, coverage, or results. Consider a consultation when the visitor wants help deciding and the clinic offers one. A simple thank-you, decline, or request to wait can end the turn without a question.
+Stay curious when the visitor is exploring. Acknowledge worries about pain, cost, or a visit in their own terms. Use a short, genuine line such as ‘We can take it at your pace.’ Skip stock openings such as ‘I completely understand’ or ‘just to let you know.’ Answer what you can. Offer one helpful, low-pressure next step when appropriate. Give the approved price or range if asked and explain any conditions without making up fees, availability, coverage, or results. Consider a consultation when the visitor wants help deciding and the clinic offers one. A simple thank-you, decline, or request to wait can end the turn without a question. In most active scheduling or service discussions, end with one short, specific question that moves things forward. When someone corrects you, acknowledge the correction and use the corrected details, or ask one focused question to resolve what is still unclear. If someone asks whether the visit is 30 minutes and approved facts say 20 minutes, say it usually takes about 20 minutes. Ask whether they need both patients seen if they ask about bringing someone, and check with staff before suggesting a single visit can cover both.
 Once they want to request an appointment, pick up from the last detail they gave. Ask only for the next missing detail: service, preferred date, or exact time. If they give a window like Thursday afternoon, ask what time that afternoon works. After a time like 3:15 without AM or PM, clarify if ambiguous. Respect a clearly flexible preference. Don't repeat a booking invitation or ask for a phone number when staff can follow up in Messenger. An acknowledgement alone does not start a booking. An affirmative reply to a clear request offer can count as consent when the required details are already known.`;
 
 const weekdays = ["Sunday|Sun|Linggo|Domingo", "Monday|Mon|Lunes", "Tuesday|Tue|Tues|Martes",
@@ -25,7 +25,7 @@ const dayOfMonth = "(?:0?[1-9]|[12]\\d|3[01])(?:st|nd|rd|th)?";
 const dateWithMonth = "(?:(?:" + monthNames + ")\\s+" + dayOfMonth + "|" + dayOfMonth + "\\s+(?:" + monthNames + "))(?:,?\\s+\\d{4})?";
 const dayPattern = "(?:(?:(?:" + weekdayNames + "),?\\s+)?" + dateWithMonth +
   "|(?:this\\s+|next\\s+)?(?:" + weekdayNames + ")" +
-  "|today|tomorrow|karon|ugma|ngayon|bukas|\\d{4}-\\d{2}-\\d{2})";
+  "|(?:the\\s+)?day\\s+after\\s+tomorrow|today|tomorrow|karon|ugma|ngayon|bukas|\\d{4}-\\d{2}-\\d{2})";
 const clockPattern = "(?:(?:0?[1-9]|1[0-2])(?::[0-5]\\d)?\\s*[ap]\\.?m\\.?|(?:0\\d|1\\d|2[0-3]):[0-5]\\d|noon|midnight)";
 const dayPreference = new RegExp("^" + dayPattern + "$", "i");
 const clockPreference = new RegExp("^" + clockPattern + "$", "i");
@@ -43,6 +43,10 @@ const approveNewRequest = /^(?:yes(?:,? please)?|please do|go ahead|send it)[.!\
 const statedDay = new RegExp("^" + statedEarlier + "(" + dayPattern + ")[.!?\\s]*$", "i");
 const statedClock = new RegExp("^" + statedEarlier + "(?:at\\s+)?(" + clockPattern +
   ")(?:\\s+((?:cebu|manila|philippine|ph) time))?(?:\\s+(?:please|ok(?:ay)?))?[.!?\\s]*$", "i");
+const unsureClock = /^(?:at\s+)?(0?[1-9]|1[0-2])(?::([0-5]\d)|\s*o[’']?[-\s]*clock)?[.!?\s]*$/i;
+const correctionPrefix = /^(?:(?:no|sorry|actually)[,.! ]+)?(?:(?:i meant|i said|make it|change it to|move it to|it should be)\s+|(?:actually|sorry)[, ]+|not\s+(?:today|tomorrow)[, ]+)/i;
+const correctedDate = new RegExp("^(" + dayPattern + ")(?:\\s+at\\s+(" + clockPattern +
+  "))?(?:,?\\s+(?:instead|not\\s+(?:" + dayPattern + ")))?[.!?\\s]*$", "i");
 const secondBooking = /\b(?:another|a second|an additional|a separate)\s+(?:appointment|booking|visit)\b/i;
 const confirmedNewRequest = "new_booking";
 const changeActions = new Set(["change_time", "change_service", "cancel"]);
@@ -52,7 +56,7 @@ const followupTitles = {
   cancel: "Messenger cancellation requested",
   follow_up: "Messenger follow-up needs staff"
 };
-const directBookingRequest = /\b(?:(?:can|could|may) (?:i|we) (?:(?:just|simply) )?(?:book|schedule|come in)|i(?:'d|’d| would) like to (?:book|schedule|come in)|please (?:book|schedule))\b/i;
+const directBookingRequest = /\b(?:(?:can|could|may) (?:i|we) (?:(?:just|simply) )?(?:book|schedule|come in)|i(?:'d|’d| would) like to (?:book|schedule|come in)|i can book|please (?:book|schedule))\b/i;
 
 function bookingReply(text, timeZone) {
   const [, clock, zone] = text.trim().match(statedClock) || [];
@@ -60,6 +64,29 @@ function bookingReply(text, timeZone) {
     requestedDay: text.trim().match(statedDay)?.[1] || "",
     requestedClock: !zone || timeZone === "Asia/Manila" ? clock || "" : ""
   };
+}
+
+function clarifyingClock(text) {
+  const match = text.trim().match(unsureClock);
+  return match ? Number(match[1]) + ":" + (match[2] || "00") : "";
+}
+
+function dateCorrection(text) {
+  const message = text.trim();
+  const phrase = message.replace(correctionPrefix, "");
+  const [, requestedDay, requestedClock] = phrase.match(correctedDate) || [];
+  if (!requestedDay) return null;
+  return { requestedDay, requestedClock: requestedClock || "", explicit: message !== phrase || /\b(?:not|instead)\b/i.test(phrase) };
+}
+
+function savedRequestClock(submitted, timeZone) {
+  const timestamp = Date.parse(submitted?.staffAction?.appointment_at);
+  if (Number.isFinite(timestamp) && timeZone) {
+    return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit", hour12: true }).format(timestamp);
+  }
+  const requestedTime = submitted?.details.requestedTime;
+  const clock = typeof requestedTime === "string" ? requestedTime.split(" at ")[1]?.trim() || "" : "";
+  return clockPreference.test(clock) ? clock : "";
 }
 
 function explicitChangedClock(text, timeZone) {
@@ -118,7 +145,8 @@ function calendarDay(quote, timeZone, received) {
   const weekday = weekdays.findIndex(names => names.toLowerCase().split("|").includes(phrase.replace(/^this /, "")));
   const today = ["today", "karon", "ngayon"].includes(phrase);
   const tomorrow = ["tomorrow", "ugma", "bukas"].includes(phrase);
-  if (weekday === -1 && !today && !tomorrow) return quote;
+  const dayAfterTomorrow = /^(?:the )?day after tomorrow$/.test(phrase.replace(/\s+/g, " "));
+  if (weekday === -1 && !today && !tomorrow && !dayAfterTomorrow) return quote;
 
   let parts;
   try {
@@ -129,7 +157,7 @@ function calendarDay(quote, timeZone, received) {
   }
   const local = Object.fromEntries(parts.map(({ type, value }) => [type, Number(value)]));
   const date = new Date(Date.UTC(local.year, local.month - 1, local.day));
-  const offset = tomorrow ? 1 : today ? 0 : (weekday - date.getUTCDay() + 7) % 7;
+  const offset = dayAfterTomorrow ? 2 : tomorrow ? 1 : today ? 0 : (weekday - date.getUTCDay() + 7) % 7;
   date.setUTCDate(date.getUTCDate() + offset);
   return new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" }).format(date);
 }
@@ -139,8 +167,10 @@ function bookingPreference(draft, text, previous, timeZone, received, collecting
   const dateAlternatives = /\b(?:or|either|instead of|except|can['’]t|cannot|not)\b/i.test(text);
   const explicitBooking = directBookingRequest.test(text) || draft.intent === "booking" ||
     draft.handoffReason === "service_verification" || (draft.bookingIntent === true && !previous?.bookingActive);
-  const uniqueDay = explicitBooking && days.length === 1 && !dateAlternatives ? days[0][1] : "";
-  let requestedDay = shortReply.requestedDay || uniqueDay ||
+  const singleDay = days.length === 1 && !dateAlternatives ? days[0][1] : "";
+  const uniqueDay = explicitBooking || /\bday\s+after\s+tomorrow$/i.test(singleDay) ? singleDay : "";
+  const correctedDay = collecting && dateCorrection(text)?.requestedDay;
+  let requestedDay = shortReply.requestedDay || correctedDay || uniqueDay ||
     quotedPreference(draft.requestedDay, text, undefined, dayPreference);
   let dayAnchor = requestedDay ? received : previous?.dayAnchor ?? received;
   if (!requestedDay && (!explicitBooking || !days.length)) {
@@ -304,7 +334,7 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return (await readSubscription()).includes("messages");
   }
 
-  function appointmentFollowup(draft, text, previous, submitted, timeZone, received) {
+  function appointmentFollowup(draft, text, previous, submitted, timeZone, received, correction) {
     const action = changeActions.has(draft.requestAction) ? draft.requestAction :
       draft.requestAction === "follow_up" ? "follow_up" : "";
     if (!action || (!submitted && action === "follow_up")) return null;
@@ -340,6 +370,11 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
       requestedClock: pending ? previous.requestedClock : "",
       dayAnchor: pending ? previous.dayAnchor : received
     }, timeZone, received, true, bookingReply(text, timeZone));
+    if (correction) {
+      preference.requestedDay = correction.requestedDay;
+      preference.dayAnchor = received;
+      preference.requestedClock = correction.requestedClock || savedRequestClock(submitted, timeZone);
+    }
     const concreteDay = concreteChangeDay(preference.requestedDay, timeZone, preference.dayAnchor);
     if (concreteDay) {
       preference.dayLabel = concreteDay;
@@ -359,14 +394,95 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
         reply: "The earlier request is closed. Would you like me to send a new request for " +
           preference.requestedTime + "?" };
     }
-    if (preference.requestedTime === priorDetails.requestedTime) {
-      return { intent: "answer", reply: "The clinic team already has that requested time." };
+    const lastChange = previous?.lastFollowup;
+    if (preference.requestedTime === priorDetails.requestedTime ||
+        (lastChange?.action === "change_time" && lastChange.targetCaseKey === submitted?.event_key &&
+          lastChange.requestedTime === preference.requestedTime)) {
+      return { intent: "answer", lastFollowup: lastChange,
+        reply: "The clinic team already has your request for " + preference.requestedTime + "." };
     }
-    return acknowledge("I’ve passed the request for " + preference.requestedTime +
-      " to the clinic team. They’ll confirm the change here.", { ...anchor, ...preference });
+    return acknowledge((correction ? "Thanks for clarifying. I’ve sent the updated request for " : "I’ve passed the request for ") +
+      preference.requestedTime + " to the clinic team. They’ll confirm the change here.", { ...anchor, ...preference });
+  }
+
+  function finalizeBooking(request, previous, facts, timeZone, received, replyLanguage) {
+    if (facts?.bookingMode === "information") {
+      return { intent: "answer", reply: "I can help with clinic questions. Please contact the clinic team to request an appointment.",
+        service: request.service, requestedTime: "" };
+    }
+    const { requestedDay, requestedClock, flexibility, requestedTime, service, serviceNeedsCheck, bookingActive } = request;
+    const ambiguousDate = /^next /i.test(requestedDay);
+    const needsDate = !requestedDay || ambiguousDate;
+    if (!service || ambiguousDate || (!flexibility && (needsDate || !requestedClock))) {
+      const question = !service ? "What would you like to come in for?" :
+        needsDate ? "What date works for you?" : "What time works best that day?";
+      const checking = serviceNeedsCheck && !previous?.serviceNeedsCheck;
+      const reply = checking ? "I can ask the team about " + service.toLowerCase() + ". " + question : question;
+      return { intent: "answer", reply, ...request };
+    }
+    if (requestedDay && requestedClock && dateAlreadyPassed(request, timeZone, received)) {
+      return { intent: "answer", reply: "That time has already passed. What other day and time would work for you?",
+        service, serviceNeedsCheck, bookingActive, requestedTime: "" };
+    }
+    if (serviceNeedsCheck) {
+      const reply = requestedDay && requestedClock
+        ? "I’ve asked our team to check on " + service.toLowerCase() + " for " + requestedTime + ". They’ll let you know here what’s possible."
+        : "I’ve asked our team to check on " + service.toLowerCase() + ". They’ll follow up here about your request.";
+      return { intent: "handoff", reply, ...request };
+    }
+    const reply = requestedDay && requestedClock
+      ? "I’ve passed along your request for " + requestedTime + ". The clinic team will confirm the appointment here."
+      : "Thanks, I’ve shared your preferences with the clinic team. They’ll message you here to confirm a time.";
+    const localized = ["tl", "ceb"].includes(replyLanguage)
+      ? "Sige. " + reply.replace(/^Thanks, I’ve/, "I’ve") : reply;
+    return { intent: "booking", reply: localized, ...request };
   }
 
   async function draftReply(page, previous, history, text, facts, timeZone, received, submitted) {
+    const pendingClock = previous?.pendingAction === "clarify_booking_clock" && previous.clockToConfirm;
+    if (previous?.bookingActive && !previous.requestedClock && previous.requestedDay) {
+      const uncertainClock = clarifyingClock(text);
+      const date = concreteChangeDay(previous.requestedDay, timeZone, previous.dayAnchor ?? received);
+      if (date && uncertainClock) {
+        const repeated = pendingClock === uncertainClock;
+        const reply = repeated
+          ? "For " + date + ", is that " + uncertainClock + " PM or " + uncertainClock + " AM?"
+          : "Did you mean " + uncertainClock + " PM on " + date + "?";
+        return { ...previous, intent: "answer", pendingAction: "clarify_booking_clock",
+          clockToConfirm: uncertainClock, clockNeedsMeridiem: repeated, requestedTime: date, reply };
+      }
+      const answer = bookingReply(text, timeZone);
+      const meridiem = text.trim().match(/^([ap])\.?m\.?[.!]?$/i)?.[1]?.toUpperCase();
+      const confirmedClock = pendingClock && (answer.requestedClock ||
+        (meridiem ? pendingClock + " " + meridiem + "M" :
+          !previous.clockNeedsMeridiem && approveNewRequest.test(text.trim()) ? pendingClock + " PM" : ""));
+      if (date && confirmedClock) {
+        const { service, serviceNeedsCheck, newBooking } = previous;
+        const request = { bookingActive: true, service, serviceNeedsCheck, newBooking,
+          requestedDay: date, dayLabel: date, dayAnchor: received, requestedClock: confirmedClock,
+          requestedTime: date + " at " + confirmedClock };
+        return finalizeBooking(request, previous, facts, timeZone, received);
+      }
+      if (date && pendingClock && previous.clockNeedsMeridiem && approveNewRequest.test(text.trim())) {
+        return { ...previous, reply: "Which one should I use for " + date + ", " + pendingClock +
+          " PM or " + pendingClock + " AM?" };
+      }
+      if (date && pendingClock && deferring.test(text.trim())) {
+        return { intent: "answer", service: previous.service, requestedTime: "",
+          reply: "Of course. If you’d like to come in another time, what works better?" };
+      }
+    }
+
+    const correction = dateCorrection(text);
+    const previousRequestedAnAppointment = previous?.intent === "booking" ||
+      (previous?.intent === "handoff" && Boolean(previous.requestedTime)) || previous?.requestAction === "change_time";
+    const existingDay = savedRequestDay(submitted, timeZone, received);
+    if (correction && existingDay && !previous?.bookingActive && (correction.explicit || previousRequestedAnAppointment)) {
+      const correctedDay = concreteChangeDay(correction.requestedDay, timeZone, received);
+      if (correctedDay !== existingDay || correction.requestedClock) {
+        return appointmentFollowup({ requestAction: "change_time" }, text, previous, submitted, timeZone, received, correction);
+      }
+    }
     const changedClock = explicitChangedClock(text, timeZone);
     const stated = bookingReply(text, timeZone);
     if (changedClock || (previous?.pendingAction === "change_time" && (stated.requestedDay || stated.requestedClock))) {
@@ -403,9 +519,9 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
 ${conversationalStyle}
 
 Return JSON with intent (answer, booking, or handoff), reply, handoffReason (clinical, staff_requested, existing_appointment, service_verification, or other), bookingIntent (true when the visitor has asked to make a new booking and is still giving details), service, serviceSelected, serviceNeedsCheck, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
-Service is the service the visitor actually wants. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, use answer while collecting their preferred day and exact time. Service verification alone must keep the conversation open while appointment details are missing. For “Could I come in for a cleaning Thursday afternoon?” when cleaning is unlisted, a good reply is “We can take it at your pace. I can ask the team about a cleaning. What time Thursday afternoon works for you?” Carry Thursday forward after they give the clock time. Once the request is complete, use booking so the server can route it for staff verification. Reserve handoffReason service_verification for an appointment request about an unlisted service. Use the other handoff reasons for clinical questions, requests for a person, or other issues. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
-For requestedDay and requestedClock, quote the visitor's words as separate fields, for example "Thursday, November 19" and "3:15 PM". Read the recent exchanges and priorPreference together. Carry forward the known details if they still apply. The latest correction wins. If they supply a time after you asked for one, keep their earlier day. Never ask for a day or time they already gave. Quote day and time only, excluding names and other private details. Keep the year exactly as supplied. Leave AM or PM out until the visitor supplies it. Use flexibility only for a short direct quote like "I'm flexible" or "any time works", never for a partial preference or a tentative reply. If the date, time zone or time is ambiguous or the visitor named a different time zone, ask what clinic-local date and time they prefer. Treat "next Thursday" and similar phrases as ambiguous until the visitor specifies the calendar date. Return empty strings for unknown or withdrawn details. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
-After a request has been sent, keep answering the visitor’s practical follow-up questions using approved facts, even while staff reviews the request. Answer the question directly. Skip another invitation to book when it is the same visit. Acknowledgements and repeats of an already submitted preference should get a brief acknowledgement without sending again. The visitor can ask for changes or a cancellation while staff reviews. Use requestAction (change_time, change_service, cancel, follow_up, new_booking or empty). Use change_time for a clearly requested new date or time for the referenced request, change_service for a requested replacement service, and cancel for an explicit request to cancel the referenced appointment or request. An informational question about changes, availability, or cancellation policy is an answer with no action. Use follow_up only when a staff reply is needed and the question cannot be answered from approved facts. Use new_booking only when the visitor explicitly asks for another appointment; if the target of a change is unclear, ask which appointment they mean. If the visitor is answering a question asked for pendingAction, repeat that action and give the newly supplied detail. The server records staff requests. Never say a change or cancellation has already taken effect. For example, after a cleaning request, “Where are you?” gets the approved address. “Can we move it to 5 PM?” requests change_time. “What’s your cancellation policy?” is a question. “Please cancel that appointment” requests cancel.
+Service is the appointment the visitor wants now. If they explicitly ask to schedule a consultation to discuss braces, use consultation as the service rather than braces treatment. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, use answer while collecting their preferred day and exact time. Service verification alone must keep the conversation open while appointment details are missing. For “Could I come in for a cleaning Thursday afternoon?” when cleaning is unlisted, a good reply is “We can take it at your pace. I can ask the team about a cleaning. What time Thursday afternoon works for you?” Carry Thursday forward after they give the clock time. Once the request is complete, use booking so the server can route it for staff verification. Reserve handoffReason service_verification for an appointment request about an unlisted service. Use the other handoff reasons for clinical questions, requests for a person, or other issues. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
+For requestedDay and requestedClock, quote the visitor's words as separate fields, for example "Thursday, November 19" and "3:15 PM". Read the recent exchanges and priorPreference together. Carry forward the known details if they still apply. The latest correction wins. If they supply a time after you asked for one, keep their earlier day. Never ask for a day or time they already gave. Quote day and time only, excluding names and other private details. Keep the year exactly as supplied. Treat “day after tomorrow” as a single phrase and keep it verbatim. If someone says “2 o’clock,” ask whether they mean 2 PM on the full calendar date instead of asking for the time again. Leave AM or PM out until the visitor confirms it. Use flexibility only for a short direct quote like "I'm flexible" or "any time works", never for a partial preference or a tentative reply. If the date, time zone or time is ambiguous or the visitor named a different time zone, ask what clinic-local date and time they prefer. Treat "next Thursday" and similar phrases as ambiguous until the visitor specifies the calendar date. Return empty strings for unknown or withdrawn details. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
+After a request has been sent, keep answering the visitor’s practical follow-up questions using approved facts, even while staff reviews the request. Answer the question directly. Skip another invitation to book when it is the same visit. Acknowledgements and repeats of an already submitted preference should get a brief acknowledgement without sending again. A corrected day or time is an actual change, even if the other detail is the same. Use change_time and carry forward the unchanged detail. Never claim staff got an update unless a case is created or amended. The visitor can ask for changes or a cancellation while staff reviews. Use requestAction (change_time, change_service, cancel, follow_up, new_booking or empty). Use change_time for a clearly requested new date or time for the referenced request, change_service for a requested replacement service, and cancel for an explicit request to cancel the referenced appointment or request. An informational question about changes, availability, or cancellation policy is an answer with no action. Use follow_up only when a staff reply is needed and the question cannot be answered from approved facts. Use new_booking only when the visitor explicitly asks for another appointment; if the target of a change is unclear, ask which appointment they mean. If the visitor is answering a question asked for pendingAction, repeat that action and give the newly supplied detail. The server records staff requests. Never say a change or cancellation has already taken effect. For example, after a cleaning request, “Where are you?” gets the approved address. “Can we move it to 5 PM?” requests change_time. “What’s your cancellation policy?” is a question. “Please cancel that appointment” requests cancel.
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
             ...(history.length ? history.flatMap(({ message, reply }) => [
@@ -488,41 +604,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         (shortReply.requestedDay && (!previous?.requestedDay || /^next /i.test(previous.requestedDay)));
       const continuation = suppliedMissingDetail && request.requestedDay && request.requestedClock;
       const intake = draft.intent === "booking" || serviceVerification || continuation;
-      if (intake && facts?.bookingMode === "information") {
-        return { intent: "answer", reply: "I can help with clinic questions. Please contact the clinic team to request an appointment.",
-          service, requestedTime: "" };
-      }
       if (bookingActive && deferring.test(text.trim())) {
         return { intent: "answer", reply: "Of course. Take your time.", service, serviceNeedsCheck, requestedTime: "" };
       }
-      if (intake) {
-        const { requestedDay, requestedClock, flexibility, requestedTime } = request;
-        const ambiguousDate = /^next /i.test(requestedDay);
-        const needsDate = !requestedDay || ambiguousDate;
-        if (!service || ambiguousDate || (!flexibility && (needsDate || !requestedClock))) {
-          const question = !service ? "What would you like to come in for?" :
-            needsDate ? "What date works for you?" : "What time works best that day?";
-          const checking = serviceNeedsCheck && !previous?.serviceNeedsCheck;
-          const reply = checking ? "I can ask the team about " + service.toLowerCase() + ". " + question : question;
-          return { intent: "answer", reply, ...request };
-        }
-        if (requestedDay && requestedClock && dateAlreadyPassed(request, timeZone, received)) {
-          return { intent: "answer", reply: "That time has already passed. What other day and time would work for you?",
-            service, serviceNeedsCheck, bookingActive, requestedTime: "" };
-        }
-        if (serviceNeedsCheck) {
-          const reply = requestedDay && requestedClock
-            ? "I’ve asked our team to check on " + service.toLowerCase() + " for " + requestedTime + ". They’ll let you know here what’s possible."
-            : "I’ve asked our team to check on " + service.toLowerCase() + ". They’ll follow up here about your request.";
-          return { intent: "handoff", reply, ...request };
-        }
-        const reply = requestedDay && requestedClock
-          ? "I’ve passed along your request for " + requestedTime + ". The clinic team will confirm the appointment here."
-          : "Thanks, I’ve shared your preferences with the clinic team. They’ll message you here to confirm a time.";
-        const localized = ["tl", "ceb"].includes(draft.replyLanguage)
-          ? "Sige. " + reply.replace(/^Thanks, I’ve/, "I’ve") : reply;
-        return { intent: "booking", reply: localized, ...request };
-      }
+      if (intake) return finalizeBooking(request, previous, facts, timeZone, received, draft.replyLanguage);
       return { intent: draft.intent, reply: draft.reply.trim().slice(0, 900), ...request,
         ...(submitted && draft.intent === "handoff" ? { targetCaseKey: submitted.event_key, requestAction: "follow_up" } : {}),
         ...(previousFollowup && draft.intent === "answer" ? { lastFollowup: previousFollowup } : {}) };
@@ -574,7 +659,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       const context = previous && Date.parse(previous.received_at) > received - day
         ? { ...previous.draft, ...(previous.case_key ? { bookingActive: false } : {}) } : null;
       if (priorCase && submitted?.kind === "inquiry.followup_needed" && !submitted.details.requestedTime &&
-          (explicitChangedClock(text, route.location.timezone) || context?.pendingAction === "change_time")) {
+          (explicitChangedClock(text, route.location.timezone) || dateCorrection(text)?.explicit || context?.pendingAction === "change_time")) {
         const datedTurn = await ledger.recentMessengerTurn(conversationKey, {
           caseSince: new Date(received - referenceWindow).toISOString(), withPreference: true
         });
@@ -600,7 +685,8 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
           reply: "Thanks for messaging us about our Facebook post. How can we help?" };
       }
       if (draft.requestAction && draft.intent === "handoff") {
-        draft = { ...draft, lastFollowup: { action: draft.requestAction } };
+        draft = { ...draft, lastFollowup: { action: draft.requestAction,
+          targetCaseKey: draft.targetCaseKey, requestedTime: draft.requestedTime } };
       }
       if (message.source) draft = { ...draft, commentSource: message.source };
       turn = await ledger.prepareMessengerTurn({

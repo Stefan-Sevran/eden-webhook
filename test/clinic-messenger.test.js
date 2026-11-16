@@ -732,3 +732,79 @@ test("a clear time change asks for a calendar date when there is no anchored app
   assert.equal(f.modelInputs.length, 0);
   assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13, 2026 at 5 PM");
 });
+
+test("Cebu asks whether 2 o’clock means 2 PM on the full Wednesday date, then saves once after clarification", async () => {
+  const start = Date.parse("2026-11-16T08:19:00Z");
+  const f = fixture(null, null, input => {
+    if (input.message.includes("got any exact address")) return { intent: "answer", service: "Cleaning",
+      reply: "We’re in Cebu. What time on Wednesday works for you?", requestedDay: "Wednesday" };
+    assert.fail("The short clock reply should not depend on a model draft.");
+  });
+  f.route.location.timezone = "Asia/Manila";
+  clock.now = start + 3000;
+  try {
+    const deliver = (id, text, offset) => f.make().processPayload(payload(id, text, start + offset));
+    await deliver("cebu-address-wednesday", "Very well, i can book for wednesday then. You are in Cebu...got any exact address?", 0);
+    await deliver("cebu-two-o-clock", "2 o clock", 100);
+    assert.match(f.sends.at(-1).message.text, /Did you mean 2:00 PM on Wednesday, November 18, 2026/);
+    await deliver("cebu-repeated-clock", "2 o clock", 200);
+    assert.match(f.sends.at(-1).message.text, /Wednesday, November 18, 2026.*2:00 PM or 2:00 AM/);
+    await deliver("cebu-confirms-ambiguously", "Yes", 300);
+    assert.equal(f.cases.size, 0);
+    await deliver("cebu-confirms-afternoon", "PM", 400);
+    await deliver("cebu-confirms-afternoon", "PM", 400);
+    assert.equal(f.cases.size, 1);
+    assert.equal(f.modelInputs.length, 1);
+    assert.equal([...f.cases.values()][0].details.requestedTime, "Wednesday, November 18, 2026 at 2:00 PM");
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("a first scheduling request takes day after tomorrow as a whole, even if the model says tomorrow", async () => {
+  const start = Date.parse("2026-11-16T08:25:00Z");
+  const f = fixture(null, null, () => ({ intent: "booking", reply: "Draft", service: "Consultation",
+    requestedDay: "tomorrow", requestedClock: "2 PM" }));
+  f.route.location.timezone = "Asia/Manila";
+  clock.now = start + 1000;
+  try {
+    await f.make().processPayload(payload("cebu-relative-day", "Can we book a consultation the day after tomorrow at 2 PM?", start));
+    assert.equal(f.cases.size, 1);
+    assert.equal([...f.cases.values()][0].details.requestedTime, "Wednesday, November 18, 2026 at 2 PM");
+    assert.match(f.sends.at(-1).message.text, /Wednesday, November 18, 2026 at 2 PM/);
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("a visitor correcting a submitted date updates the workspace and preserves the chosen hour", async () => {
+  const start = Date.parse("2026-11-16T08:25:00Z");
+  clock.now = start + 3000;
+  try {
+    for (const reviewed of [false, true]) {
+      const f = fixture(null, null, () => ({ intent: "booking", reply: "Draft", service: "Consultation",
+        requestedDay: "tomorrow", requestedClock: "2 PM" }));
+      f.route.location.timezone = "Asia/Manila";
+      await f.make().processPayload(payload("cebu-wrong-day", "Could I book the consultation tomorrow at 2 PM?", start));
+      if (reviewed) f.touch();
+      const correction = reviewed ? "The day after tomorrow" : "Actually, I meant the day after tomorrow, not tomorrow.";
+      await f.make().processPayload(payload("cebu-corrected-day", correction, start + 200));
+      await f.make().processPayload(payload("cebu-corrected-day", correction, start + 200));
+      assert.equal(f.modelInputs.length, 1);
+      assert.equal(f.cases.size, reviewed ? 2 : 1);
+      const [request, followup] = f.cases.values();
+      if (reviewed) {
+        assert.equal(request.details.requestedTime, "Tuesday, November 17, 2026 at 2 PM");
+        assert.equal(followup.details.relatedRequestKey, request.event_key);
+      } else {
+        assert.equal(request.details.messengerAmendments.length, 1);
+      }
+      assert.equal((followup || request).details.requestedTime, "Wednesday, November 18, 2026 at 2 PM");
+      assert.match(f.sends.at(-1).message.text, /Thanks for clarifying.*Wednesday, November 18, 2026 at 2 PM/);
+      await f.make().processPayload(payload("cebu-repeat-correction", "It should be the day after tomorrow.", start + 300));
+      assert.equal(f.cases.size, reviewed ? 2 : 1);
+    }
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
