@@ -11,7 +11,7 @@ const fallback = {
 };
 
 const conversationalStyle = `Answer the visitor's actual question first, especially if they repeat or correct something. Match their pace and tone. Write like a warm, relaxed clinic receptionist in Messenger: usually one to three short sentences, ordinary words and contractions, varied openings, and at most one light emoji when it fits. Skip emoji for serious concerns. With Tagalog or Cebuano speakers, mirror their language and use local words naturally. Be clear that you are an AI assistant if asked.
-Stay curious when the visitor is exploring. If they're worried about pain, price, or visiting a dentist, acknowledge the specific concern and answer what you can. Offer one helpful, low-pressure next step when appropriate. Give the approved price or range if asked and explain any conditions without making up fees, availability, coverage, or results. Consider a consultation when the visitor wants help deciding and the clinic offers one. A simple thank-you, decline, or request to wait can end the turn without a question.
+Stay curious when the visitor is exploring. Acknowledge worries about pain, cost, or a visit in their own terms. Use a short, genuine line such as ‘We can take it at your pace.’ Skip stock openings such as ‘I completely understand’ or ‘just to let you know.’ Answer what you can. Offer one helpful, low-pressure next step when appropriate. Give the approved price or range if asked and explain any conditions without making up fees, availability, coverage, or results. Consider a consultation when the visitor wants help deciding and the clinic offers one. A simple thank-you, decline, or request to wait can end the turn without a question.
 Once they want to request an appointment, pick up from the last detail they gave. Ask only for the next missing detail: service, preferred date, or exact time. If they give a window like Thursday afternoon, ask what time that afternoon works. After a time like 3:15 without AM or PM, clarify if ambiguous. Respect a clearly flexible preference. Don't repeat a booking invitation or ask for a phone number when staff can follow up in Messenger. An acknowledgement alone does not start a booking. An affirmative reply to a clear request offer can count as consent when the required details are already known.`;
 
 const weekdays = ["Sunday|Sun|Linggo|Domingo", "Monday|Mon|Lunes", "Tuesday|Tue|Tues|Martes",
@@ -84,6 +84,17 @@ function bookingPreference(draft, text, previous, timeZone, received) {
   return { requestedDay, requestedClock, flexibility, dayAnchor,
     requestedTime: flexibility && !(requestedDay && requestedClock)
       ? [requestedTime, flexibility].filter(Boolean).join(" · ") : requestedTime };
+}
+
+function serviceLabel(value) {
+  return value.toLowerCase().replace(/[-‑–]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function mentionsService(text, service) {
+  const name = serviceLabel(service).replace(/^dental /, "");
+  if (!name) return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("(?<![\\p{L}\\p{N}])" + escaped + "s?(?![\\p{L}\\p{N}])", "u").test(serviceLabel(text));
 }
 
 function parseClinicPages(raw, edenPageId) {
@@ -186,13 +197,15 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
             { role: "system", content: `You are the AI receptionist for ${page.clinicName}. Use only the approved facts below. Never diagnose, prescribe, promise a slot, or say an appointment is confirmed. For urgent concerns direct the visitor to local emergency services and hand off. Hand off clinical questions, staff requests, changes to existing appointments, and issues outside the approved facts that need staff. Do not gather or repeat medical history.
 ${conversationalStyle}
 
-Return JSON with intent (answer, booking, or handoff), reply, service, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
+Return JSON with intent (answer, booking, or handoff), reply, service, serviceSelected, serviceNeedsCheck, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
+Service is the service the visitor actually wants. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, collect their preferred day and time as usual. Once the request is complete, use booking so the server can route it for staff verification. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
 For requestedDay and requestedClock, quote the visitor's words as separate fields, for example "Thursday, November 19" and "3:15 PM". Carry forward known details from priorPreference if they still apply; the latest correction wins. Quote day and time only, excluding names and other private details. Keep the year exactly as supplied. Leave AM or PM out until the visitor supplies it. Use flexibility only for a short direct quote like "I'm flexible" or "any time works", never for a partial preference or a tentative reply. If the date, time zone or time is ambiguous or the visitor named a different time zone, ask what clinic-local date and time they prefer. Treat "next Thursday" and similar phrases as ambiguous until the visitor specifies the calendar date. Return empty strings for unknown or withdrawn details. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
             ...(previous ? [{ role: "assistant", content: previous.reply }] : []),
             { role: "user", content: JSON.stringify({
               priorService: previous?.service || "",
+              priorServiceNeedsCheck: previous?.serviceNeedsCheck === true,
               priorPreference: {
                 requestedDay: previous?.requestedDay || "",
                 requestedClock: previous?.requestedClock || "",
@@ -206,8 +219,15 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       if (!result.ok) return fallback;
       const data = await result.json();
       const draft = JSON.parse(data.choices?.[0]?.message?.content || "");
-      const service = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
-      const preference = bookingPreference(draft, text, previous, timeZone, received);
+      const proposedService = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
+      const priorService = previous?.service || "";
+      const differentService = priorService && proposedService && serviceLabel(priorService) !== serviceLabel(proposedService);
+      const serviceChanged = differentService && draft.serviceSelected === true && mentionsService(text, proposedService);
+      const service = priorService && !serviceChanged ? priorService : proposedService;
+      const serviceNeedsCheck = Boolean(service && (draft.serviceNeedsCheck === true ||
+        (!serviceChanged && previous?.serviceNeedsCheck === true) ||
+        (typeof facts?.services === "string" && facts.services.trim() && !mentionsService(facts.services, service))));
+      const request = { service, serviceNeedsCheck, ...bookingPreference(draft, text, previous, timeZone, received) };
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim()) return fallback;
       if (draft.intent === "booking" && facts?.bookingMode === "information") {
@@ -216,24 +236,30 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       }
       if (draft.intent === "booking") {
         if (deferring.test(text.trim())) {
-          return { intent: "answer", reply: "Of course. Take your time.", service, ...preference };
+          return { intent: "answer", reply: "Of course. Take your time.", ...request };
         }
-        const { requestedDay, requestedClock, flexibility, requestedTime } = preference;
+        const { requestedDay, requestedClock, flexibility, requestedTime } = request;
         const ambiguousDate = /^next /i.test(requestedDay);
         const needsDate = !requestedDay || ambiguousDate;
         if (!service || ambiguousDate || (!flexibility && (needsDate || !requestedClock))) {
           const reply = !service ? "What would you like to come in for?" :
             needsDate ? "What date works for you?" : "What time works best that day?";
-          return { intent: "answer", reply, service, ...preference };
+          return { intent: "answer", reply, ...request };
+        }
+        if (serviceNeedsCheck) {
+          const reply = requestedDay && requestedClock
+            ? "I’ve asked our team to check on " + service.toLowerCase() + " for " + requestedTime + ". They’ll let you know here what’s possible."
+            : "I’ve asked our team to check on " + service.toLowerCase() + ". They’ll follow up here about your request.";
+          return { intent: "handoff", reply, ...request };
         }
         const reply = requestedDay && requestedClock
           ? "I’ve passed along your request for " + requestedTime + ". The clinic team will confirm the appointment here."
           : "Thanks, I’ve shared your preferences with the clinic team. They’ll message you here to confirm a time.";
         const localized = ["tl", "ceb"].includes(draft.replyLanguage)
           ? "Sige. " + reply.replace(/^Thanks, I’ve/, "I’ve") : reply;
-        return { intent: "booking", reply: localized, service, ...preference };
+        return { intent: "booking", reply: localized, ...request };
       }
-      return { intent: draft.intent, reply: draft.reply.trim().slice(0, 900), service, ...preference };
+      return { intent: draft.intent, reply: draft.reply.trim().slice(0, 900), ...request };
     } catch {
       return fallback;
     }
