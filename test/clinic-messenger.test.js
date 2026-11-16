@@ -20,7 +20,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
 function fixture(commentConfig, readSetupTest, modelDraft) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
-  let connected = true, closed = false, sendFails = false;
+  let connected = true, touched = false, sendFails = false;
   const ledger = {
     async messengerLocation(id, config) {
       assert.equal(id, pageId); assert.equal(config.locationId, locationId);
@@ -28,10 +28,26 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     },
     async activateMessengerConnection() { route.status = "connected"; },
     async messengerTurn(key) { return turns.get(key); },
-    async recentMessengerTurn(key) {
-      return [...turns.values()].reverse().find(turn => turn.conversation_key === key);
+    async recentMessengerTurn(key, { caseSince } = {}) {
+      return [...turns.values()].reverse().find(turn => turn.conversation_key === key &&
+        (!caseSince || (turn.case_key && turn.received_at >= caseSince)));
     },
-    async messengerCaseOpen() { return !closed; },
+    async messengerCase(route, key, candidatePage, candidateSender) {
+      const event = cases.get(key);
+      return event?.account_id === route.account_id && event.location_id === route.location_id &&
+        event.details.pageId === candidatePage && event.details.senderId === candidateSender ? event : null;
+    },
+    async amendMessengerRequest(route, candidatePage, candidateSender, key, changeKey, draft) {
+      const event = await this.messengerCase(route, key, candidatePage, candidateSender);
+      if (!event || touched) return false;
+      const changes = event.details.messengerAmendments ||= [];
+      if (!changes.includes(changeKey)) {
+        changes.push(changeKey);
+        if (draft.requestAction === "change_time") event.details.requestedTime = draft.requestedTime;
+        if (draft.requestAction === "change_service") event.details.service = draft.service;
+      }
+      return true;
+    },
     async commentDraft(candidate, postId, code) {
       return [...cases.values()].some(event => event.kind === "comment.draft" &&
         event.account_id === candidate.account_id && event.location_id === candidate.location_id &&
@@ -81,7 +97,7 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     }
   });
   return { make, turns, cases, sends, modelInputs, route, commentPilot,
-    disconnect: () => { connected = false; }, close: () => { closed = true; },
+    disconnect: () => { connected = false; }, touch: () => { touched = true; },
     failSend: () => { sendFails = true; } };
 }
 
@@ -163,10 +179,11 @@ test("only a verified binding receives replies and a conversation creates one bo
   assert.equal(request.details.service, "Braces");
   assert.equal(request.notify_to, "clinic@example.test");
   await messenger.processPayload(payload("while-open", "Any update?", timestamp + 800));
-  assert.equal(f.sends.length, 2);
+  assert.equal(f.sends.length, 3);
+  assert.equal(f.cases.size, 1);
   f.disconnect();
   await messenger.processPayload(payload("unapproved", "Hi", timestamp + 900));
-  assert.equal(f.sends.length, 2);
+  assert.equal(f.sends.length, 3);
 });
 
 test("one connected post produces review-only drafts and tags a later Messenger booking", async () => {
@@ -222,12 +239,12 @@ test("attachments hand off, and a rejected send is never retried after restart",
   assert.equal(f.modelInputs.length, 0);
   assert.equal([...f.cases.values()][0].kind, "inquiry.followup_needed");
   await messenger.processPayload(payload("pending", "Are you there?", timestamp + 100));
-  assert.equal(f.sends.length, 1);
-  f.close(); f.failSend();
+  assert.equal(f.sends.length, 2);
+  f.failSend();
   const message = payload("failed", "Hi", timestamp + 500);
   await messenger.processPayload(message);
   await f.make().processPayload(message);
-  assert.equal(f.sends.length, 2);
+  assert.equal(f.sends.length, 3);
   assert.equal(f.cases.size, 2);
   assert.equal([...f.turns.values()].at(-1).state, "needs_review");
 });
@@ -362,7 +379,6 @@ test("Messenger carries the corrected time forward and hands clinical questions 
   await messenger.processPayload(payload("original-clock", "Please check cleaning on Thursday at 3 PM"));
   await messenger.processPayload(payload("corrected-clock", "Yes, but make it 4:30 PM", timestamp + 500));
   assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday at 4:30 PM");
-  f.close();
   await messenger.processPayload(payload("handoff", "Could I speak to someone about a clinical concern?", timestamp + 800));
   assert.equal([...f.cases.values()][1].kind, "inquiry.followup_needed");
 });
@@ -487,7 +503,8 @@ test("Cebu's 4:15 PM reply completes the requested Thursday despite missing mode
     assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 19, 2026 at 4:15 PM");
     await f.make().processPayload(payload("cebu-repeat-day", "Thursday", start + 1000));
     assert.equal(f.cases.size, 1);
-    assert.equal(f.sends.length, 2);
+    assert.equal(f.sends.length, 3);
+    assert.match(f.sends[2].message.text, /clinic team has your request/);
   } finally {
     clock.now = timestamp + 1000;
   }
@@ -539,4 +556,117 @@ test("a remembered day and a new split time cannot create a request in the past"
   await messenger.processPayload(payload("past-clock", "4:15 PM Cebu time.", timestamp + 500));
   assert.equal(f.cases.size, 0);
   assert.match(f.sends[1].message.text, /already passed/);
+});
+
+test("after booking, FAQs are answered and an untouched request is amended once even after restart", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message.startsWith("Please book")) {
+      return { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM", reply: "Request sent." };
+    }
+    assert.equal(input.submittedRequest.service, "Cleaning");
+    if (input.message === "Where are you?") {
+      return { intent: "answer", reply: "We’re next to the main entrance." };
+    }
+    return { intent: "handoff", requestAction: "change_time", requestedClock: "5 PM", reply: "I can ask the team." };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("initial-booking", "Please book cleaning Thursday at 4:15 PM"));
+  await messenger.processPayload(payload("location-question", "Where are you?", timestamp + 200));
+  assert.equal(f.sends[1].message.text, "We’re next to the main entrance.");
+  assert.equal(f.cases.size, 1);
+
+  const change = payload("change-time", "Could we move it to 5 PM?", timestamp + 500);
+  await f.make().processPayload(change);
+  await f.make().processPayload(change);
+  const [request] = f.cases.values();
+  assert.equal(request.details.requestedTime, "Thursday, November 12, 2026 at 5 PM");
+  assert.equal(request.details.messengerAmendments.length, 1);
+  assert.equal(f.sends.length, 3);
+  assert.equal(f.cases.size, 1);
+  assert.match(f.sends[2].message.text, /confirm the change here/);
+});
+
+test("after staff touches a request, changes, cancellation and a staff question are separate linked tasks", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message.startsWith("Please book")) {
+      return { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM", reply: "Request sent." };
+    }
+    if (input.message.startsWith("Could we move")) {
+      return { intent: "handoff", requestAction: "change_time", requestedClock: "5 PM", reply: "I can ask the team." };
+    }
+    if (input.message.startsWith("Could we do")) {
+      return { intent: "handoff", requestAction: "change_service", service: "Check-up", reply: "I can ask the team." };
+    }
+    if (input.message === "What’s your cancellation policy?") {
+      return { intent: "answer", reply: "We ask for one day's notice." };
+    }
+    if (input.message.includes("cancel")) {
+      return { intent: "handoff", requestAction: "cancel", reply: "I can ask the team." };
+    }
+    return { intent: "handoff", requestAction: "follow_up", reply: "Let me ask the team." };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("staff-original", "Please book cleaning Thursday at 4:15 PM"));
+  f.touch();
+  await messenger.processPayload(payload("staff-question", "Can someone check if my insurance covers this?", timestamp + 100));
+  await messenger.processPayload(payload("staff-time", "Could we move it to 5 PM?", timestamp + 200));
+  await messenger.processPayload(payload("staff-service", "Could we do a check-up instead?", timestamp + 300));
+  await messenger.processPayload(payload("staff-cancel-policy", "What’s your cancellation policy?", timestamp + 500));
+  await messenger.processPayload(payload("staff-cancel", "Please cancel it", timestamp + 600));
+  await messenger.processPayload(payload("staff-cancel-repeat", "Please cancel it", timestamp + 700));
+
+  const [original, question, time, service, cancellation] = f.cases.values();
+  assert.equal(f.cases.size, 5);
+  assert.equal(original.details.requestedTime, "Thursday, November 12, 2026 at 4:15 PM");
+  assert.equal(original.details.service, "Cleaning");
+  assert.deepEqual([question, time, service, cancellation].map(event => event.details.messengerRequestAction),
+    ["follow_up", "change_time", "change_service", "cancel"]);
+  assert.ok([question, time, service, cancellation].every(event => event.kind === "inquiry.followup_needed" &&
+    event.details.relatedRequestKey === original.event_key));
+  assert.equal(time.details.requestedTime, "Thursday, November 12, 2026 at 5 PM");
+  assert.equal(service.details.service, "Check-up");
+  assert.equal(f.sends[4].message.text, "We ask for one day's notice.");
+  assert.match(f.sends[5].message.text, /cancellation request/);
+});
+
+test("Messenger can recall the same thread's submitted request on a later day without the old transcript", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message.startsWith("Please book")) {
+      return { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM", reply: "Request sent." };
+    }
+    assert.equal(input.submittedRequest.service, "Cleaning");
+    return { intent: "handoff", requestAction: "cancel", reply: "I can ask the team." };
+  });
+  await f.make().processPayload(payload("past-session-booking", "Please book cleaning Thursday at 4:15 PM"));
+  const later = timestamp + 2 * 86400000;
+  clock.now = later;
+  try {
+    await f.make().processPayload(payload("past-session-cancel", "Please cancel my request.", later));
+    assert.equal(f.modelInputs[1].messages.length, 2);
+    const [original, cancellation] = f.cases.values();
+    assert.equal(cancellation.details.relatedRequestKey, original.event_key);
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("a time change can collect the missing hour on the next message", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message.startsWith("Please book")) {
+      return { intent: "booking", service: "Cleaning", requestedDay: "Thursday", requestedClock: "4:15 PM", reply: "Request sent." };
+    }
+    if (input.message.startsWith("Move")) return { intent: "handoff", requestAction: "change_time",
+      requestedDay: "Friday, November 13", reply: "I can ask the team." };
+    return { intent: "answer", reply: "Which day?" };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("two-part-original", "Please book cleaning Thursday at 4:15 PM"));
+  await messenger.processPayload(payload("two-part-amendment", "Move it to Friday, November 13 in the afternoon.", timestamp + 100));
+  assert.match(f.sends[1].message.text, /What time/);
+  await messenger.processPayload(payload("two-part-clock", "4:30 PM Cebu time.", timestamp + 200));
+  assert.equal(f.cases.size, 1);
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13 at 4:30 PM");
 });

@@ -5,6 +5,7 @@ const { isUuid } = require("./clinic-tenant");
 
 const day = 24 * 60 * 60 * 1000;
 const recentExchangeLimit = 8;
+const referenceWindow = 30 * day;
 const recentConversationLimit = 500;
 const pageNumber = /^\d{5,30}$/;
 const fallback = {
@@ -38,6 +39,15 @@ const statedEarlier = "(?:i already (?:mentioned|said)\\s+)?";
 const statedDay = new RegExp("^" + statedEarlier + "(" + dayPattern + ")[.!?\\s]*$", "i");
 const statedClock = new RegExp("^" + statedEarlier + "(?:at\\s+)?(" + clockPattern +
   ")(?:\\s+((?:cebu|manila|philippine|ph) time))?(?:\\s+(?:please|ok(?:ay)?))?[.!?\\s]*$", "i");
+const secondBooking = /\b(?:another|a second|an additional|a separate)\s+(?:appointment|booking|visit)\b/i;
+const confirmedNewRequest = "new_booking";
+const changeActions = new Set(["change_time", "change_service", "cancel"]);
+const followupTitles = {
+  change_time: "Messenger request to change appointment time",
+  change_service: "Messenger request to change service",
+  cancel: "Messenger cancellation requested",
+  follow_up: "Messenger follow-up needs staff"
+};
 const directBookingRequest = /\b(?:(?:can|could|may) (?:i|we) (?:(?:just|simply) )?(?:book|schedule|come in)|i(?:'d|’d| would) like to (?:book|schedule|come in)|please (?:book|schedule))\b/i;
 
 function bookingReply(text, timeZone) {
@@ -248,7 +258,60 @@ function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome,
     return (await readSubscription()).includes("messages");
   }
 
-  async function draftReply(page, previous, history, text, facts, timeZone, received) {
+  function appointmentFollowup(draft, text, previous, submitted, timeZone, received) {
+    const action = changeActions.has(draft.requestAction) ? draft.requestAction :
+      draft.requestAction === "follow_up" ? "follow_up" : "";
+    if (!action || (!submitted && action === "follow_up")) return null;
+    const priorDetails = submitted?.details || {};
+    const serviceBefore = priorDetails.service || "";
+    const anchor = { targetCaseKey: submitted?.event_key, service: serviceBefore, requestedTime: "" };
+    const acknowledge = (reply, details = anchor) => ({ ...details, intent: "handoff", requestAction: action, reply });
+
+    if (action === "cancel") {
+      return acknowledge("I’ve passed your cancellation request to the clinic team. They’ll follow up with you here.");
+    }
+
+    if (action === "follow_up") {
+      return acknowledge("I’ve passed your follow-up to the clinic team. They’ll get back to you here.");
+    }
+
+    if (action === "change_service") {
+      const service = typeof draft.service === "string" ? draft.service.trim().slice(0, 100) : "";
+      if (service && serviceLabel(service) === serviceLabel(serviceBefore)) {
+        return { intent: "answer", reply: "The request already lists " + serviceBefore.toLowerCase() + "." };
+      }
+      if (!service || !mentionsService(text, service)) {
+        return { ...anchor, intent: "answer", pendingAction: action, reply: "What service would you like instead?" };
+      }
+      return acknowledge("I’ve shared your updated service request with the clinic team. They’ll confirm what they can arrange.",
+        { ...anchor, service, requestedTime: priorDetails.requestedTime || "" });
+    }
+
+    const pending = previous?.pendingAction === action && previous.targetCaseKey === submitted?.event_key;
+    const originalDay = typeof priorDetails.requestedTime === "string" && priorDetails.requestedTime.includes(" at ")
+      ? priorDetails.requestedTime.split(" at ", 1)[0] : "";
+    const verifiedDay = dayPreference.test(originalDay) ? originalDay : "";
+    const preference = bookingPreference(draft, text, {
+      requestedDay: pending ? previous.requestedDay : verifiedDay,
+      requestedClock: pending ? previous.requestedClock : "",
+      dayAnchor: pending ? previous.dayAnchor : received
+    }, timeZone, received, true, bookingReply(text, timeZone));
+    const passed = preference.requestedDay && preference.requestedClock && dateAlreadyPassed(preference, timeZone, received);
+    if (!preference.requestedDay || /^next /i.test(preference.requestedDay) || !preference.requestedClock || passed) {
+      return { ...anchor, ...preference, intent: "answer", pendingAction: action,
+        ...(passed ? { requestedDay: "", requestedClock: "" } : {}),
+        reply: passed ? "That time has already passed. What other day and time would work?" :
+          !preference.requestedDay || /^next /i.test(preference.requestedDay)
+            ? "What date would you like instead?" : "What time would work on that day?" };
+    }
+    if (preference.requestedTime === priorDetails.requestedTime) {
+      return { intent: "answer", reply: "The clinic team already has that requested time." };
+    }
+    return acknowledge("I’ve passed the request for " + preference.requestedTime +
+      " to the clinic team. They’ll confirm the change here.", { ...anchor, ...preference });
+  }
+
+  async function draftReply(page, previous, history, text, facts, timeZone, received, submitted) {
     if (!openaiKey) return fallback;
     try {
       const result = await fetchImpl("https://api.openai.com/v1/chat/completions", {
@@ -265,6 +328,7 @@ ${conversationalStyle}
 Return JSON with intent (answer, booking, or handoff), reply, handoffReason (clinical, staff_requested, existing_appointment, service_verification, or other), bookingIntent (true when the visitor has asked to make a new booking and is still giving details), service, serviceSelected, serviceNeedsCheck, requestedDay, requestedClock, flexibility, and replyLanguage (en, tl, or ceb). Use answer while clarifying or answering questions. Use booking when the visitor clearly wants a request submitted and has provided the service and a specific day/date and exact clock time, or explicitly authorizes a flexible request. If their preferred time has already passed, ask for a new preference. Do not treat an availability question as consent by itself. The clinic team confirms the appointment.
 Service is the service the visitor actually wants. Keep priorService until they clearly request or choose another specific service in their own words. Set serviceSelected to true only if they name and choose that service in this message. A time, a generic yes, or a question about an alternative does not choose a different service. When a service is absent from approved facts, set serviceNeedsCheck to true, say you can check with the team, and keep the original service. Don't assume the clinic doesn't offer it. If they want to come in, use answer while collecting their preferred day and exact time. Service verification alone must keep the conversation open while appointment details are missing. For “Could I come in for a cleaning Thursday afternoon?” when cleaning is unlisted, a good reply is “We can take it at your pace. I can ask the team about a cleaning. What time Thursday afternoon works for you?” Carry Thursday forward after they give the clock time. Once the request is complete, use booking so the server can route it for staff verification. Reserve handoffReason service_verification for an appointment request about an unlisted service. Use the other handoff reasons for clinical questions, requests for a person, or other issues. Offer alternatives only when asked and keep any alternative out of the service field until they choose it.
 For requestedDay and requestedClock, quote the visitor's words as separate fields, for example "Thursday, November 19" and "3:15 PM". Read the recent exchanges and priorPreference together. Carry forward the known details if they still apply. The latest correction wins. If they supply a time after you asked for one, keep their earlier day. Never ask for a day or time they already gave. Quote day and time only, excluding names and other private details. Keep the year exactly as supplied. Leave AM or PM out until the visitor supplies it. Use flexibility only for a short direct quote like "I'm flexible" or "any time works", never for a partial preference or a tentative reply. If the date, time zone or time is ambiguous or the visitor named a different time zone, ask what clinic-local date and time they prefer. Treat "next Thursday" and similar phrases as ambiguous until the visitor specifies the calendar date. Return empty strings for unknown or withdrawn details. The message arrived at ${new Date(received).toISOString()}. The clinic time zone is ${timeZone || "unspecified"}.
+After a request has been sent, keep answering the visitor’s practical follow-up questions using approved facts, even while staff reviews the request. Answer the question directly. Skip another invitation to book when it is the same visit. Acknowledgements and repeats of an already submitted preference should get a brief acknowledgement without sending again. The visitor can ask for changes or a cancellation while staff reviews. Use requestAction (change_time, change_service, cancel, follow_up, new_booking or empty). Use change_time for a clearly requested new date or time for the referenced request, change_service for a requested replacement service, and cancel for an explicit request to cancel the referenced appointment or request. An informational question about changes, availability, or cancellation policy is an answer with no action. Use follow_up only when a staff reply is needed and the question cannot be answered from approved facts. Use new_booking only when the visitor explicitly asks for another appointment; if the target of a change is unclear, ask which appointment they mean. If the visitor is answering a question asked for pendingAction, repeat that action and give the newly supplied detail. The server records staff requests. Never say a change or cancellation has already taken effect. For example, after a cleaning request, “Where are you?” gets the approved address. “Can we move it to 5 PM?” requests change_time. “What’s your cancellation policy?” is a question. “Please cancel that appointment” requests cancel.
 Approved clinic facts:
 ${facts ? JSON.stringify(facts) : page.facts}` },
             ...(history.length ? history.flatMap(({ message, reply }) => [
@@ -273,6 +337,12 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
             { role: "user", content: JSON.stringify({
               priorService: previous?.service || "",
               priorBookingIntent: previous?.bookingActive === true,
+              pendingAction: previous?.pendingAction || "",
+              submittedRequest: submitted ? {
+                service: submitted.details.service || "",
+                requestedTime: submitted.details.requestedTime || "",
+                previousRequestType: submitted.kind
+              } : null,
               priorServiceNeedsCheck: previous?.serviceNeedsCheck === true,
               priorPreference: {
                 requestedDay: previous?.requestedDay || "",
@@ -297,13 +367,36 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         (typeof facts?.services === "string" && facts.services.trim() && !mentionsService(facts.services, service))));
       if (!["answer", "booking", "handoff"].includes(draft.intent) ||
           typeof draft.reply !== "string" || !draft.reply.trim()) return fallback;
+      const availableRequest = submitted && (submitted.kind === "booking.requested" || submitted.details.requestedTime);
+      const previousFollowup = previous?.lastFollowup;
+      const statedPreference = bookingReply(text, timeZone);
+      const completingTimeChange = previous?.pendingAction === "change_time" && draft.intent === "answer" &&
+        (statedPreference.requestedDay || statedPreference.requestedClock);
+      const requestAction = draft.requestAction || (completingTimeChange ? "change_time" : "");
+      if (requestAction === "cancel" && previousFollowup?.action === "cancel") {
+        return { intent: "answer", lastFollowup: previousFollowup,
+          reply: "The clinic team already has your cancellation request and will follow up here." };
+      }
+
+      const related = appointmentFollowup({ ...draft, requestAction }, text, previous, availableRequest ? submitted :
+        requestAction === "follow_up" ? submitted : null, timeZone, received);
+      if (related) return related;
+      const separateBooking = requestAction === confirmedNewRequest || secondBooking.test(text) ||
+        (previous?.newBooking === true && previous?.bookingActive === true);
+      if (availableRequest && !separateBooking) {
+        if (draft.intent === "booking" || statedPreference.requestedDay || statedPreference.requestedClock) {
+          return { intent: "answer", reply: "The clinic team has your request and will follow up here.",
+            ...(previousFollowup ? { lastFollowup: previousFollowup } : {}) };
+        }
+      }
       const serviceVerification = draft.intent === "handoff" &&
         draft.handoffReason === "service_verification" && serviceNeedsCheck;
       const continuing = previous?.bookingActive === true;
       const bookingActive = draft.intent === "booking" || serviceVerification ||
-        (draft.intent === "answer" && (continuing || draft.bookingIntent === true || directBookingRequest.test(text)));
+        (draft.intent === "answer" && (!availableRequest || separateBooking) &&
+          (continuing || draft.bookingIntent === true || directBookingRequest.test(text)));
       const shortReply = continuing && draft.intent !== "handoff" ? bookingReply(text, timeZone) : {};
-      const request = { service, serviceNeedsCheck, bookingActive,
+      const request = { service, serviceNeedsCheck, bookingActive, ...(separateBooking ? { newBooking: true } : {}),
         ...bookingPreference(draft, text, previous, timeZone, received, bookingActive, shortReply) };
       const suppliedMissingDetail = (shortReply.requestedClock && !previous?.requestedClock) ||
         (shortReply.requestedDay && (!previous?.requestedDay || /^next /i.test(previous.requestedDay)));
@@ -344,7 +437,10 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
           ? "Sige. " + reply.replace(/^Thanks, I’ve/, "I’ve") : reply;
         return { intent: "booking", reply: localized, ...request };
       }
-      return { intent: draft.intent, reply: draft.reply.trim().slice(0, 900), ...request };
+      return { intent: draft.intent, reply: draft.reply.trim().slice(0, 900), ...request,
+        ...(submitted && draft.intent === "handoff" ? { targetCaseKey: submitted.event_key, requestAction: "follow_up" } : {}),
+        ...(previousFollowup && draft.intent === "answer" ? { lastFollowup: previousFollowup } : {}) };
+
     } catch {
       return fallback;
     }
@@ -382,10 +478,14 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
     if (!turn) {
       const previous = await ledger.recentMessengerTurn(conversationKey);
       if (previous && Date.parse(previous.received_at) > received) return;
-      if (previous?.case_key && await ledger.messengerCaseOpen(route, previous.case_key)) return;
-      const context = previous && !previous.case_key && Date.parse(previous.received_at) > received - day
-        ? previous.draft : null;
-      if (!context) recentConversations.delete(conversationKey);
+      const priorCase = previous?.case_key && Date.parse(previous.received_at) > received - referenceWindow
+        ? previous : previous && await ledger.recentMessengerTurn(conversationKey, {
+          caseSince: new Date(received - referenceWindow).toISOString()
+        });
+      const caseKey = priorCase?.draft?.targetCaseKey || priorCase?.case_key;
+      const submitted = caseKey && await ledger.messengerCase(route, caseKey, pageId, senderId);
+      const context = previous && Date.parse(previous.received_at) > received - day
+        ? { ...previous.draft, ...(previous.case_key ? { bookingActive: false } : {}) } : null;
       const history = (recentConversations.get(conversationKey) || [])
         .filter(exchange => exchange.received > received - day);
       const message = await commentPilot?.messageContext({ pageId, route, text, received,
@@ -393,11 +493,15 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       let draft = fallback;
       if (!hasAttachment && message.text) {
         customerMessage = message.text;
-        draft = await draftReply(page, context, history, message.text, route.location.messenger_facts, route.location.timezone, received);
+        draft = await draftReply(page, context, history, message.text, route.location.messenger_facts,
+          route.location.timezone, received, submitted);
       }
       if (!hasAttachment && !message.text && message.source) {
         draft = { intent: "answer", service: "", requestedTime: "",
           reply: "Thanks for messaging us about our Facebook post. How can we help?" };
+      }
+      if (draft.requestAction && draft.intent === "handoff") {
+        draft = { ...draft, lastFollowup: { action: draft.requestAction } };
       }
       if (message.source) draft = { ...draft, commentSource: message.source };
       turn = await ledger.prepareMessengerTurn({
@@ -408,20 +512,28 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
     const commentSource = turn.draft.commentSource;
     if (commentSource?.received === received) await commentPilot?.recordStarted(route, conversationKey, commentSource);
     const canActivate = route.status === "verifying" && Boolean(turn.case_key);
-    const saveCase = (key, intent) => recordOutcome({
-      event_key: key, clinic_id: route.location_id, account_id: route.account_id, location_id: route.location_id,
-      channel: "facebook_messenger", kind: intent === "booking" ? "booking.requested" : "inquiry.followup_needed",
-      status: intent === "booking" ? "AWAITING_CLINIC" : "NEEDS_STAFF",
-      summary: testId ? "Messenger setup test" :
-        intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
-      details: {
-        pageId, ...(testId ? { demo: true, messengerSetupTestId: testId } : { senderId }),
-        service: turn.draft.service, requestedTime: turn.draft.requestedTime,
-        ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
-        ...(intent === "booking" ? { bookingId: key } : {})
-      },
-      notify_to: testId ? null : route.location.alert_email
-    });
+    const saveCase = async (key, intent) => {
+      const { requestAction, targetCaseKey } = turn.draft;
+      const related = requestAction && targetCaseKey;
+      if (related && ["change_time", "change_service"].includes(requestAction) &&
+          await ledger.amendMessengerRequest(route, pageId, senderId, targetCaseKey, key, turn.draft)) return;
+      return recordOutcome({
+        event_key: key, clinic_id: route.location_id, account_id: route.account_id, location_id: route.location_id,
+        channel: "facebook_messenger", kind: intent === "booking" ? "booking.requested" : "inquiry.followup_needed",
+        status: intent === "booking" ? "AWAITING_CLINIC" : "NEEDS_STAFF",
+        summary: testId ? "Messenger setup test" : requestAction ? followupTitles[requestAction] :
+          intent === "booking" ? "Messenger booking request" : "Messenger conversation needs staff",
+        details: {
+          pageId, ...(testId ? { demo: true, messengerSetupTestId: testId } : { senderId }),
+          service: turn.draft.service, requestedTime: turn.draft.requestedTime,
+          ...(requestAction ? { messengerRequestAction: requestAction } : {}),
+          ...(related ? { relatedRequestKey: targetCaseKey } : {}),
+          ...(commentSource ? { commentPilotPostId: commentSource.postId, commentPilotCode: commentSource.code } : {}),
+          ...(intent === "booking" ? { bookingId: key } : {})
+        },
+        notify_to: testId ? null : route.location.alert_email
+      });
+    };
     const finishSent = async () => {
       if (testId) await saveCase(turn.case_key, "booking");
       if (canActivate) await ledger.activateMessengerConnection(route);
@@ -459,7 +571,7 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
 
     const markedSent = await ledger.updateMessengerTurn(eventKey, "sending", "sent");
     if (testId && !markedSent) throw Error("Messenger setup reply could not be recorded");
-    if (markedSent && !turn.case_key && customerMessage) {
+    if (markedSent && customerMessage) {
       rememberExchange(conversationKey, received, customerMessage, turn.draft.reply);
     }
     await finishSent();

@@ -230,13 +230,24 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return row?.token_ciphertext ?? null;
   }
 
-  async function messengerCaseOpen(route, key) {
+  async function messengerCase(route, eventKey, pageId, senderId) {
     const params = new URLSearchParams({
-      select: "action", event_key: `eq.${key}`, account_id: `eq.${route.account_id}`,
-      location_id: `eq.${route.location_id}`, limit: "1"
+      select: "event_key,kind,details", event_key: `eq.${eventKey}`, account_id: `eq.${route.account_id}`,
+      location_id: `eq.${route.location_id}`, channel: "eq.facebook_messenger",
+      "details->>pageId": `eq.${pageId}`, "details->>senderId": `eq.${senderId}`, limit: "1"
     });
-    const [row] = await database(`clinic_followup_states?${params}`);
-    return !["handled", "booked"].includes(row?.action);
+    const [row] = await database(`clinic_outcomes?${params}`);
+    return row;
+  }
+
+  async function amendMessengerRequest(route, pageId, senderId, targetKey, changeKey, draft) {
+    return database("rpc/amend_untouched_messenger_request", {
+      method: "POST", body: JSON.stringify({
+        target_account: route.account_id, target_location: route.location_id,
+        target_page: pageId, target_sender: senderId, target_event: targetKey, change_event: changeKey,
+        change_kind: draft.requestAction, new_service: draft.service || null, new_time: draft.requestedTime || null
+      })
+    });
   }
 
   function commentDraftPath(route, postId, filters) {
@@ -274,10 +285,11 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return row;
   }
 
-  async function recentMessengerTurn(conversationKey) {
+  async function recentMessengerTurn(conversationKey, { caseSince } = {}) {
     const params = new URLSearchParams({
       conversation_key: `eq.${conversationKey}`,
-      order: "received_at.desc,updated_at.desc,event_key", limit: "1"
+      order: "received_at.desc,updated_at.desc,event_key", limit: "1",
+      ...(caseSince ? { case_key: "not.is.null", received_at: `gte.${caseSince}` } : {})
     });
     const [row] = await database(`clinic_messenger_turns?${params}`);
     return row;
@@ -372,7 +384,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,
     saveMessengerCredential, messengerCredential, saveMessengerFacts,
-    messengerCaseOpen, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
+    messengerCase, amendMessengerRequest, messengerTurn, recentMessengerTurn, prepareMessengerTurn, updateMessengerTurn };
 }
 
 module.exports = { outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger };
