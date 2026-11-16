@@ -63,8 +63,8 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
         assert.ok(body.messages[0].content.includes(route.location.messenger_facts ?
           JSON.stringify(route.location.messenger_facts) : "Open 9–5"));
         const input = JSON.parse(body.messages.at(-1).content);
-        const draft = modelDraft ? modelDraft(input) : input.message === "Saturday please" ?
-          { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedTime: "Saturday" } :
+        const draft = modelDraft ? modelDraft(input) : input.message === "Please book Saturday at 2 PM" ?
+          { intent: "booking", reply: "Untrusted wording", service: input.priorService, requestedDay: "Saturday", requestedClock: "2 PM" } :
           { intent: "answer", reply: "We open at 9. What day works for you?", service: "Braces", requestedTime: "" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(draft) } }] });
       }
@@ -96,10 +96,10 @@ test("Messenger uses the confirmed facts and respects the clinic's appointment h
   f.route.location.messenger_facts = { services: "Dental exam", hours: "10–4", bookingMode: "information" };
   const messenger = f.make();
   await messenger.processPayload(payload("hours-confirmed", "What hours are you open?"));
-  await messenger.processPayload(payload("no-booking", "Saturday please"));
+  await messenger.processPayload(payload("no-booking", "Please book Saturday at 2 PM"));
   assert.match(f.modelInputs[0].messages[0].content, /Dental exam/);
   assert.doesNotMatch(f.modelInputs[0].messages[0].content, /Open 9–5/);
-  assert.match(f.sends[1].message.text, /clinic team handles appointments/);
+  assert.match(f.sends[1].message.text, /contact the clinic team to request an appointment/);
   assert.equal(f.cases.size, 0);
 });
 
@@ -145,21 +145,21 @@ test("only a verified binding receives replies and a conversation creates one bo
   assert.equal(f.sends.length, 0);
   await messenger.processPayload(payload("hello", "I want braces"));
   assert.equal(f.route.status, "verifying");
-  const second = payload("booking", "Saturday please", timestamp + 500);
+  const second = payload("booking", "Please book Saturday at 2 PM", timestamp + 500);
   await Promise.all([messenger.processPayload(second), messenger.processPayload(second)]);
   await f.make().processPayload(second);
   assert.equal(f.route.status, "connected");
   assert.equal(f.sends.length, 2);
   assert.equal(f.modelInputs.length, 2);
   assert.equal(f.sends[1].messaging_type, "RESPONSE");
-  assert.match(f.sends[1].message.text, /They’ll reply here to confirm the time/);
+  assert.match(f.sends[1].message.text, /The clinic team will confirm the appointment here/);
   assert.equal(f.cases.size, 1);
   const [request] = f.cases.values();
   assert.equal(request.channel, "facebook_messenger");
   assert.equal(request.kind, "booking.requested");
   assert.equal(request.account_id, accountId);
   assert.equal(request.location_id, locationId);
-  assert.equal(request.details.requestedTime, "Saturday");
+  assert.equal(request.details.requestedTime, "Saturday at 2 PM");
   assert.equal(request.details.service, "Braces");
   assert.equal(request.notify_to, "clinic@example.test");
   await messenger.processPayload(payload("while-open", "Any update?", timestamp + 800));
@@ -206,14 +206,14 @@ test("one connected post produces review-only drafts and tags a later Messenger 
   assert.equal(f.cases.size, 2);
   const modelMessage = JSON.parse(f.modelInputs.at(-1).messages.at(-1).content);
   assert.equal(modelMessage.message, "I want braces");
-  await messenger.processPayload(payload("booking", "Saturday please", timestamp + 200));
+  await messenger.processPayload(payload("booking", "Please book Saturday at 2 PM", timestamp + 200));
   const [draft, conversation, booking] = f.cases.values();
   assert.equal(draft.kind, "comment.draft");
   assert.equal(conversation.kind, "comment.messenger_started");
   assert.equal(booking.kind, "booking.requested");
   assert.equal(booking.details.commentPilotPostId, postId);
   assert.equal(booking.details.commentPilotCode, code);
-  assert.equal(booking.details.requestedTime, "Saturday");
+  assert.equal(booking.details.requestedTime, "Saturday at 2 PM");
 });
 
 test("attachments hand off, and a rejected send is never retried after restart", async () => {
@@ -271,7 +271,7 @@ test("Messenger recovers the visitor’s original date and time when the model i
   await f.make().processPayload(payload("exact-time", "Hi, could I book a dental cleaning for Thursday, November 19 at 3:15 PM Cebu time?"));
   assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 19 at 3:15 PM");
   assert.match(f.modelInputs[0].messages[0].content, /Asia\/Manila/);
-  assert.match(f.sends[0].message.text, /Thanks for reaching out!/);
+  assert.match(f.sends[0].message.text, /request for Thursday, November 19 at 3:15 PM/);
 });
 
 test("Messenger asks for clarification when an invented year cannot be grounded", async () => {
@@ -280,5 +280,103 @@ test("Messenger asks for clarification when an invented year cannot be grounded"
   }));
   await f.make().processPayload(payload("ungrounded-date", "Can I book a cleaning next Thursday?"));
   assert.equal(f.cases.size, 0);
-  assert.match(f.sends[0].message.text, /confirm the date and time/);
+  assert.match(f.sends[0].message.text, /What date works for you/);
+});
+
+test("Messenger carries the selected day across turns and logs one exact clinic-local request", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message === "Pwede cleaning Thursday afternoon?") {
+      return { intent: "answer", reply: "Pwede. What time Thursday afternoon works for you?",
+        service: "Cleaning", requestedDay: "Thursday", requestedClock: "" };
+    }
+    assert.equal(input.priorService, "Cleaning");
+    assert.equal(input.priorPreference.requestedDay, "Thursday");
+    return { intent: "booking", reply: "Your slot is guaranteed", replyLanguage: "ceb",
+      service: input.priorService, requestedDay: input.priorPreference.requestedDay, requestedClock: "3:15 PM" };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  await f.make().processPayload(payload("date-only", "Pwede cleaning Thursday afternoon?"));
+  assert.equal(f.cases.size, 0);
+  assert.match(f.sends[0].message.text, /What time Thursday afternoon/);
+  const second = payload("date-and-clock", "3:15 PM please", timestamp + 800);
+  const messenger = f.make();
+  await Promise.all([messenger.processPayload(second), messenger.processPayload(second)]);
+  assert.equal(f.cases.size, 1);
+  assert.equal(f.sends.length, 2);
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 12, 2026 at 3:15 PM");
+  assert.match(f.sends[1].message.text, /^Sige\. I’ve passed along your request/);
+  assert.match(f.sends[1].message.text, /clinic team will confirm/);
+  assert.doesNotMatch(f.sends[1].message.text, /guaranteed/);
+});
+
+test("Messenger gives exploratory and hesitant visitors room to decide", async () => {
+  const f = fixture(null, null, input => input.message === "How much is a cleaning?" ?
+    { intent: "answer", reply: "Cleaning starts at ₱800. What would you like to know about the visit?", service: "Cleaning" } :
+    { intent: "answer", reply: "Of course. Take your time." });
+  f.route.location.messenger_facts = { services: "Cleaning starts at ₱800", bookingMode: "requests" };
+  const messenger = f.make();
+  await messenger.processPayload(payload("curious", "How much is a cleaning?"));
+  await messenger.processPayload(payload("hesitant", "I’ll think about it", timestamp + 800));
+  assert.equal(f.cases.size, 0);
+  assert.match(f.modelInputs[0].messages[0].content, /Answer the visitor's actual question first/);
+  assert.match(f.modelInputs[0].messages[0].content, /low-pressure next step/);
+  assert.equal(f.modelInputs[1].messages.at(-2).role, "assistant");
+  assert.match(f.sends[0].message.text, /starts at ₱800/);
+  assert.equal(f.sends[1].message.text, "Of course. Take your time.");
+});
+
+test("Messenger requires an unambiguous time or an explicit flexible request", async () => {
+  for (const [message, fields, expected] of [
+    ["Cleaning Thursday at 3?", { requestedDay: "Thursday", requestedClock: "3 PM" }, null],
+    ["Cleaning Thursday at 3:03 PM?", { requestedDay: "Thursday", requestedClock: "03 PM" }, "Thursday at 3:03 PM"],
+    ["Please book a cleaning next Thursday at 3 PM", { requestedDay: "next Thursday", requestedClock: "3 PM" }, null],
+    ["Book a cleaning Thursday or Friday afternoon", { requestedDay: "Thursday", flexibility: "any time" }, null],
+    ["Please book a cleaning, I'm flexible", { flexibility: "I'm flexible" }, "I'm flexible"],
+    ["Can't do Thursday at 3 PM. Could you book Friday?", { requestedDay: "Friday", requestedClock: "" }, null]
+  ]) {
+    const f = fixture(null, null, () => ({ intent: "booking", reply: "Untrusted wording", service: "Cleaning", ...fields }));
+    await f.make().processPayload(payload("preference", message));
+    if (expected === null) {
+      assert.equal(f.cases.size, 0, message);
+      assert.match(f.sends[0].message.text, /What (date|time) works/, message);
+    } else {
+      assert.equal([...f.cases.values()][0].details.requestedTime, expected, message);
+    }
+  }
+});
+
+test("Messenger carries the corrected time forward and hands clinical questions to staff", async () => {
+  const f = fixture(null, null, input => {
+    if (input.message === "Please check cleaning on Thursday at 3 PM") {
+      return { intent: "answer", reply: "I can send that to the team. Shall I?", service: "Cleaning",
+        requestedDay: "Thursday", requestedClock: "3 PM" };
+    }
+    if (input.message === "Yes, but make it 4:30 PM") {
+      assert.equal(input.priorPreference.requestedClock, "3 PM");
+      return { intent: "booking", reply: "Untrusted wording", service: "Cleaning",
+        requestedDay: input.priorPreference.requestedDay, requestedClock: "4:30 PM" };
+    }
+    return { intent: "handoff", reply: "I’ll ask the clinic team to help with that." };
+  });
+  const messenger = f.make();
+  await messenger.processPayload(payload("original-clock", "Please check cleaning on Thursday at 3 PM"));
+  await messenger.processPayload(payload("corrected-clock", "Yes, but make it 4:30 PM", timestamp + 500));
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday at 4:30 PM");
+  f.close();
+  await messenger.processPayload(payload("handoff", "Could I speak to someone about a clinical concern?", timestamp + 800));
+  assert.equal([...f.cases.values()][1].kind, "inquiry.followup_needed");
+});
+
+
+test("Messenger honors a clear deferral even when a complete preference is on record", async () => {
+  const f = fixture(null, null, input => ({
+    intent: input.message === "Maybe later." ? "booking" : "answer",
+    reply: "I can pass that request to the team. Shall I?",
+    service: "Cleaning", requestedDay: "Fri", requestedClock: "3:15 PM"
+  }));
+  const messenger = f.make();
+  await messenger.processPayload(payload("tentative", "Is a cleaning on Fri at 3:15 PM an option?"));
+  await messenger.processPayload(payload("defer", "Maybe later.", timestamp + 800));
+  assert.equal(f.cases.size, 0);
+  assert.equal(f.sends[1].message.text, "Of course. Take your time.");
 });
