@@ -28,9 +28,10 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     },
     async activateMessengerConnection() { route.status = "connected"; },
     async messengerTurn(key) { return turns.get(key); },
-    async recentMessengerTurn(key, { caseSince } = {}) {
+    async recentMessengerTurn(key, { caseSince, withPreference } = {}) {
       return [...turns.values()].reverse().find(turn => turn.conversation_key === key &&
-        (!caseSince || (turn.case_key && turn.received_at >= caseSince)));
+        (!caseSince || (turn.case_key && turn.received_at >= caseSince)) &&
+        (!withPreference || turn.draft.requestedTime));
     },
     async messengerCase(route, key, candidatePage, candidateSender) {
       const event = cases.get(key);
@@ -668,7 +669,7 @@ test("a time change can collect the missing hour on the next message", async () 
   assert.match(f.sends[1].message.text, /What time/);
   await messenger.processPayload(payload("two-part-clock", "4:30 PM Cebu time.", timestamp + 200));
   assert.equal(f.cases.size, 1);
-  assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13 at 4:30 PM");
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13, 2026 at 4:30 PM");
 });
 
 test("a time-only change after booking uses the day staff actually confirmed", async () => {
@@ -683,4 +684,51 @@ test("a time-only change after booking uses the day staff actually confirmed", a
   const [original, change] = f.cases.values();
   assert.equal(change.details.relatedRequestKey, original.event_key);
   assert.equal(change.details.requestedTime, "Friday, November 13, 2026 at 5 PM");
+});
+
+test("the Cebu 5 PM follow-up finds a saved date behind an undated inquiry and asks before creating a new request", async () => {
+  const start = Date.parse("2026-11-16T05:05:00Z");
+  const f = fixture(null, null, input => {
+    if (input.message.startsWith("Could I book")) return { intent: "handoff", service: "Cleaning",
+      requestedDay: "Thursday", reply: "The clinic team can help check the cleaning service." };
+    if (input.message === "Where are you located?") return { intent: "answer", reply: "We’re in Cebu." };
+    return null;
+  });
+  f.route.location.timezone = "Asia/Manila";
+  clock.now = start + 3000;
+  try {
+    await f.make().processPayload(payload("date-from-earlier-request", "Could I book a cleaning Thursday?", start));
+    await f.make().processPayload(payload("later-dateless", "Is anyone there?", start + 100));
+    await f.make().processPayload(payload("address-before-time", "Where are you located?", start + 200));
+    const [original, undated] = f.cases.values();
+    assert.equal(original.details.requestedTime, "Thursday, November 19, 2026");
+    assert.equal(undated.details.requestedTime, "");
+    f.touch({ action: "handled" });
+    await f.make().processPayload(payload("cebu-exact-change", "Could we move it to 5 PM?", start + 300));
+    assert.equal(f.modelInputs.length, 3);
+    assert.equal(f.cases.size, 2);
+    assert.match(f.sends.at(-1).message.text, /earlier request is closed.*Thursday, November 19, 2026 at 5 PM/);
+    await f.make().processPayload(payload("cebu-approve-new", "Yes please", start + 400));
+    assert.equal(f.modelInputs.length, 3);
+    assert.equal(f.cases.size, 3);
+    const newRequest = [...f.cases.values()].at(-1);
+    assert.equal(newRequest.details.requestedTime, "Thursday, November 19, 2026 at 5 PM");
+    assert.equal(newRequest.details.service, "Cleaning");
+    assert.equal(newRequest.details.relatedRequestKey, undefined);
+    assert.equal(original.details.requestedTime, "Thursday, November 19, 2026");
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("a clear time change asks for a calendar date when there is no anchored appointment", async () => {
+  const f = fixture(null, null, () => null);
+  f.route.location.timezone = "Asia/Manila";
+  await f.make().processPayload(payload("no-appointment-on-file", "Could we move it to 5 PM?"));
+  assert.equal(f.cases.size, 0);
+  assert.equal(f.modelInputs.length, 0);
+  assert.match(f.sends[0].message.text, /What calendar date should I use for 5 PM/);
+  await f.make().processPayload(payload("missing-day", "Friday, November 13.", timestamp + 500));
+  assert.equal(f.modelInputs.length, 0);
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Friday, November 13, 2026 at 5 PM");
 });
