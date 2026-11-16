@@ -460,3 +460,83 @@ test("a request for a person still hands off immediately for an unlisted service
   assert.equal([...f.cases.values()][0].kind, "inquiry.followup_needed");
   assert.match(f.sends[0].message.text, /ask someone from the clinic/);
 });
+
+test("Cebu's 4:15 PM reply completes the requested Thursday despite missing model fields", async () => {
+  const start = Date.parse("2026-11-16T05:05:00Z");
+  const f = fixture(null, null, input => {
+    if (input.message.includes("nervous")) {
+      return { intent: "answer", service: "Cleaning", serviceNeedsCheck: true,
+        reply: "We can take it at your pace. I can ask the team about a cleaning. What time Thursday afternoon works for you?" };
+    }
+    if (input.message.startsWith("4:15")) {
+      return { intent: "answer", service: "Cleaning", requestedClock: "4:15 PM",
+        reply: "Thanks for sharing your preferred time! I'll check with the team about a cleaning. What day works for you?" };
+    }
+    return { intent: "answer", requestedDay: "Thursday", reply: "What time on Thursday works for you?" };
+  });
+  f.route.location.timezone = "Asia/Manila";
+  f.route.location.messenger_facts = { services: "Checkup and consultation", bookingMode: "request" };
+  clock.now = start + 2000;
+  try {
+    await f.make().processPayload(payload("cebu-nervous",
+      "Hi, I haven’t been to the dentist in a while and I’m a bit nervous. Could I come in for a cleaning Thursday afternoon?", start));
+    assert.equal(f.cases.size, 0);
+    await f.make().processPayload(payload("cebu-clock", "4:15 PM Cebu time.", start + 500));
+    assert.equal(f.cases.size, 1);
+    assert.match(f.sends[1].message.text, /cleaning.*Thursday, November 19, 2026 at 4:15 PM/);
+    assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 19, 2026 at 4:15 PM");
+    await f.make().processPayload(payload("cebu-repeat-day", "Thursday", start + 1000));
+    assert.equal(f.cases.size, 1);
+    assert.equal(f.sends.length, 2);
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("Messenger reads both sides of the last eight exchanges in the same thread only", async () => {
+  const f = fixture(null, null, () => ({ intent: "answer", reply: "Happy to help." }));
+  const messenger = f.make();
+  for (let i = 0; i < 11; i++) {
+    await messenger.processPayload(payload("history-" + i, "Clinic question " + i, timestamp + i));
+  }
+  const recent = f.modelInputs.at(-1).messages.slice(1, -1);
+  assert.equal(recent.length, 16);
+  assert.deepEqual(recent.filter(message => message.role === "user").map(message => message.content),
+    Array.from({ length: 8 }, (_, index) => "Clinic question " + (index + 2)));
+  assert.ok(recent.filter(message => message.role === "assistant").every(message => message.content === "Happy to help."));
+
+  const anotherVisitor = payload("separate-thread", "Different visitor", timestamp + 20);
+  anotherVisitor.entry[0].messaging[0].sender.id = "5555512346";
+  await messenger.processPayload(anotherVisitor);
+  assert.equal(f.modelInputs.at(-1).messages.length, 2);
+
+  const nextSession = timestamp + 25 * 60 * 60 * 1000;
+  clock.now = nextSession;
+  try {
+    await messenger.processPayload(payload("next-session", "Hello again", nextSession));
+    assert.equal(f.modelInputs.at(-1).messages.length, 2);
+  } finally {
+    clock.now = timestamp + 1000;
+  }
+});
+
+test("Messenger keeps a time supplied first and recognizes a corrected repetition of Thursday", async () => {
+  const f = fixture(null, null, input => ({ intent: "answer", service: "Cleaning",
+    requestedClock: input.priorBookingIntent ? "" : "4:15 PM", reply: "What day works for you?" }));
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("time-first", "Could I book a cleaning at 4:15 PM Cebu time?"));
+  await messenger.processPayload(payload("day-next", "I already mentioned Thrusday", timestamp + 500));
+  assert.equal(f.cases.size, 1);
+  assert.equal([...f.cases.values()][0].details.requestedTime, "Thursday, November 12, 2026 at 4:15 PM");
+});
+
+test("a remembered day and a new split time cannot create a request in the past", async () => {
+  const f = fixture(null, null, () => ({ intent: "answer", service: "Cleaning", reply: "What time?" }));
+  f.route.location.timezone = "Asia/Manila";
+  const messenger = f.make();
+  await messenger.processPayload(payload("today", "Could I book a cleaning today?"));
+  await messenger.processPayload(payload("past-clock", "4:15 PM Cebu time.", timestamp + 500));
+  assert.equal(f.cases.size, 0);
+  assert.match(f.sends[1].message.text, /already passed/);
+});
