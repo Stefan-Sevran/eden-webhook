@@ -91,21 +91,26 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return database(`clinic_booking_cases?${params}`);
   }
 
-  async function connectedLocation(accountId, locationId, channel) {
+  async function tenantLocation(accountId, locationId) {
     if (!enabled) throw new Error("Outcome ledger is not configured");
     const locationParams = new URLSearchParams({
       select: "id,account_id,name,alert_email",
       id: `eq.${locationId}`, account_id: `eq.${accountId}`, limit: "1"
     });
     const locations = await database(`clinic_locations?${locationParams}`);
-    if (!locations.length) return null;
+    return locations[0] || null;
+  }
+
+  async function connectedLocation(accountId, locationId, channel) {
+    const location = await tenantLocation(accountId, locationId);
+    if (!location) return null;
     const connectionParams = new URLSearchParams({
       select: "id", account_id: `eq.${accountId}`,
       location_id: `eq.${locationId}`, channel: `eq.${channel}`,
       status: "eq.connected", limit: "1"
     });
     const connections = await database(`clinic_channel_connections?${connectionParams}`);
-    return connections.length ? locations[0] : null;
+    return connections.length ? location : null;
   }
 
   async function recordDemoInquiry(accountId, locationId) {
@@ -386,7 +391,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return { claimed: rows.length, sent, failed };
   }
 
-  return { enabled, record, list, listBookings, connectedLocation, recordDemoInquiry,
+  return { enabled, record, list, listBookings, tenantLocation, connectedLocation, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,

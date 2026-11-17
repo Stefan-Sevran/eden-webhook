@@ -3552,6 +3552,46 @@ app.post("/integrations/tenant-booking-events", async (req, res) => {
   }
 });
 
+// The public receptionist's Worker resolves a published page to its Workspace location.
+app.post("/integrations/tenant-website-requests", async (req, res) => {
+  if (!BOOKING_INGEST_KEY || !outcomeLedger.enabled) return res.sendStatus(503);
+  if (!hasOpsAccess(req.get("authorization"), BOOKING_INGEST_KEY)) return res.sendStatus(401);
+  const { accountId, locationId, sourceEventId, requestType, patientName, contact,
+    service, requestedTime, verifiedAlertEmail } = req.body || {};
+  const booking = requestType === "booking";
+  const validText = (value, min, max) =>
+    typeof value === "string" && value.trim().length >= min && value.length <= max && !/[<>]/.test(value);
+  const validEmail = value => typeof value === "string" && value.length <= 254 &&
+    /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
+  if (![accountId, locationId, sourceEventId].every(isUuid) ||
+      (!booking && requestType !== "question") ||
+      !validText(patientName, 2, 80) || !validText(service, 2, 160) ||
+      !validText(requestedTime, booking ? 2 : 0, 100) ||
+      !validText(contact, 2, 120) ||
+      (!validEmail(contact) && !E164.test(contact.replace(/[ ()-]/g, ""))) ||
+      (verifiedAlertEmail != null && !validEmail(verifiedAlertEmail))) return res.sendStatus(400);
+  try {
+    const location = await outcomeLedger.tenantLocation(accountId, locationId);
+    if (!location) return res.sendStatus(409);
+    const result = await recordClinicOutcome({
+      event_key: outcomeKey("tenant_website", accountId, locationId, sourceEventId),
+      clinic_id: locationId,
+      account_id: accountId,
+      location_id: locationId,
+      channel: "website_chat",
+      kind: booking ? "booking.requested" : "inquiry.followup_needed",
+      status: booking ? "AWAITING_CLINIC" : "NEEDS_STAFF",
+      summary: booking ? "Website appointment request" : "Website question needs staff",
+      details: { bookingId: sourceEventId, patientName, contact, service, requestedTime },
+      notify_to: location.alert_email || verifiedAlertEmail || null
+    });
+    return res.status(result.stored ? 201 : 200).json({ ok: true });
+  } catch (error) {
+    console.error("Website request ingestion failed:", error.message);
+    return res.sendStatus(503);
+  }
+});
+
 // The voice agent's server-side booking tool submits a request, never a
 // confirmed appointment. Credentials must remain in the provider tool config.
 app.post("/integrations/tenant-voice-booking-events", async (req, res) => {
