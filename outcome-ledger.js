@@ -113,6 +113,22 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return connections.length ? location : null;
   }
 
+  async function activateWebsiteConnection(accountId, locationId) {
+    const channel = "website_chat";
+    await database("clinic_channel_connections?on_conflict=location_id,channel", {
+      method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify({ account_id: accountId, location_id: locationId, channel, status: "connected" })
+    });
+    const params = new URLSearchParams({
+      account_id: `eq.${accountId}`, location_id: `eq.${locationId}`, channel: `eq.${channel}`,
+      status: "in.(requested,verifying)"
+    });
+    await database(`clinic_channel_connections?${params}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: "connected", updated_at: new Date().toISOString() })
+    });
+  }
+
   async function recordDemoInquiry(accountId, locationId) {
     const params = new URLSearchParams({
       select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`,
@@ -391,7 +407,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     return { claimed: rows.length, sent, failed };
   }
 
-  return { enabled, record, list, listBookings, tenantLocation, connectedLocation, recordDemoInquiry,
+  return { enabled, record, list, listBookings, tenantLocation, connectedLocation, activateWebsiteConnection, recordDemoInquiry,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,

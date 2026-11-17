@@ -3585,6 +3585,9 @@ app.post("/integrations/tenant-website-requests", async (req, res) => {
       details: { bookingId: sourceEventId, patientName, contact, service, requestedTime },
       notify_to: location.alert_email || verifiedAlertEmail || null
     });
+    await outcomeLedger.activateWebsiteConnection(accountId, locationId).catch(error => {
+      console.error("Website connection status update failed:", error.message);
+    });
     return res.status(result.stored ? 201 : 200).json({ ok: true });
   } catch (error) {
     console.error("Website request ingestion failed:", error.message);

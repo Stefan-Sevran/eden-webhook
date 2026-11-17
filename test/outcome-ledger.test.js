@@ -125,3 +125,28 @@ test("unconnected website channel cannot accept a tenant booking", async () => {
   });
   assert.equal(await ledger.connectedLocation("account", "location", "website_chat"), null);
 });
+
+test("a received website request can connect its own location without overriding other connection states", async () => {
+  const requests = [];
+  const ledger = createOutcomeLedger({
+    url: "https://db.example", key: "server-secret",
+    fetchImpl: async (url, options) => {
+      requests.push({ url: new URL(url), options });
+      return { ok: true, status: 200, json: async () => [] };
+    }
+  });
+  await ledger.activateWebsiteConnection("account", "location");
+  const [insert, update] = requests;
+  assert.equal(insert.options.method, "POST");
+  assert.equal(insert.url.searchParams.get("on_conflict"), "location_id,channel");
+  assert.match(insert.options.headers.Prefer, /ignore-duplicates/);
+  assert.deepEqual(JSON.parse(insert.options.body), {
+    account_id: "account", location_id: "location", channel: "website_chat", status: "connected"
+  });
+  assert.equal(update.options.method, "PATCH");
+  assert.equal(update.url.searchParams.get("account_id"), "eq.account");
+  assert.equal(update.url.searchParams.get("location_id"), "eq.location");
+  assert.equal(update.url.searchParams.get("channel"), "eq.website_chat");
+  assert.equal(update.url.searchParams.get("status"), "in.(requested,verifying)");
+  assert.equal(JSON.parse(update.options.body).status, "connected");
+});
