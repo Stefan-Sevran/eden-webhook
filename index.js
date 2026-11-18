@@ -4309,5 +4309,6 @@ app.get("/audit-preview/:sessionId", async (req, res) => {
   }
 });
 
+require('./rescue-delivery').startRescueReports(process.env);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
