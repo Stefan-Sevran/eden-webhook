@@ -19,6 +19,37 @@ insert into clinic_memberships values('${AC}','${OWNER}','owner'),('${AC}','${ST
 set app.uid='${OWNER}';
 select configure_rescue_reports('${LOC}',current_date-80,'weekly','PHP',1500,true);
 alter table clinic_followup_actions disable trigger user;`);
+// Exercise the staff entry flow with the deployment's appointment triggers enabled.
+await db.exec(`begin;
+  alter table clinic_followup_actions enable trigger user;
+  alter table clinic_followup_actions add column assigned_user_id uuid, add column prior_action_at timestamptz,
+    add constraint clinic_followup_prior_action_check check (prior_action_at is null);`);
+await db.exec(file('supabase/migrations/20261115160224_clinic_release_assignment.sql'));
+await db.exec(file('supabase/migrations/20261119050653_allow_completed_walkin_time.sql'));
+await db.query(`insert into clinic_outcomes(event_key,clinic_id,location_id,account_id,channel,kind,status,summary,occurred_at)
+  values('cleaning-request',$1::uuid::text,$1,$2,'website_chat','booking.requested','AWAITING_CLINIC','Cleaning',current_date-3)`,[LOC,AC]);
+await db.exec('savepoint schedule_check');
+await assert.rejects(db.query(`insert into clinic_followup_actions
+  (event_key,location_id,account_id,action,actor_user_id,appointment_at)
+  values('cleaning-request',$1,$2,'booked',$3,now()-interval '1 hour')`,[LOC,AC,OWNER]), /future/);
+await db.exec('rollback to schedule_check');
+await db.exec('set local role authenticated');
+const walkinSql = "select record_clinic_walkin($1,$2,'Example patient','Cleaning',current_date-1,'PHP') as event_key";
+const walkinArgs = [LOC,'50000000-0000-4000-a000-000000000099'];
+const recorded = (await db.query(walkinSql,walkinArgs)).rows[0].event_key;
+assert.equal((await db.query(walkinSql,walkinArgs)).rows[0].event_key,recorded);
+const visit = (await db.query('select * from clinic_visit_completions where event_key=$1',[recorded])).rows[0];
+assert.equal(visit.eden_event_key,null);
+const link = "select record_clinic_visit($1,$2,$3,$4,250000,'PHP','cleaning-request')";
+await db.query(link,[LOC,recorded,visit.appointment_at,visit.revision]);
+await db.query(link,[LOC,recorded,visit.appointment_at,visit.revision]);
+await db.exec('reset role');
+const settlement = (await db.query(`select clinic_rescue_private.summary(s,'settlement',current_date-5,current_date+2) summary
+  from clinic_rescue_settings s where location_id=$1`,[LOC])).rows[0].summary;
+assert.equal(settlement.eligible_minor,250000);
+assert.equal(settlement.share_minor,37500);
+assert.equal(settlement.attributed,1);
+await db.exec('rollback');
 async function fixture(k,channel,days,demo=false) {
  await db.query(`insert into clinic_outcomes(event_key,clinic_id,location_id,account_id,channel,kind,status,summary,details,occurred_at)
  values($1,$2::uuid::text,$2::uuid,$3,$4,'booking.requested','AWAITING_CLINIC','Test',$5::jsonb,current_date-$6::int)`,[k,LOC,AC,channel,JSON.stringify({demo}),days]);
