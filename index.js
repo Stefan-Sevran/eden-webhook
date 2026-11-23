@@ -8,6 +8,7 @@ const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
 const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
+const { sendSupportTestReply } = require("./support-email-test-reply");
 const { createSupportEmailPreview } = require("./support-email-inbound");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
@@ -4321,4 +4322,13 @@ app.get("/audit-preview/:sessionId", async (req, res) => {
 
 require('./rescue-delivery').startRescueReports(process.env);
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  if (!process.env.EDEN_SUPPORT_TEST_REPLY) return;
+  void sendSupportTestReply({
+    configuration:process.env.EDEN_SUPPORT_TEST_REPLY,
+    receivingAddress:process.env.EDEN_SUPPORT_PREVIEW_ADDRESS,
+    apiKey:process.env.EDEN_SUPPORT_PREVIEW_RESEND_KEY
+  }).then(result => console.log("Eden support test reply:",result))
+    .catch(() => console.error("Eden support test reply: provider_request_failed"));
+});
