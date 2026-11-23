@@ -8,6 +8,7 @@ const { hasValidMetaSignature } = require("./meta-signature");
 const { hasValidElevenSignature } = require("./eleven-signature");
 const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
 const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
+const { createSupportEmailPreview } = require("./support-email-inbound");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -15,6 +16,15 @@ const {
 const app = express();
 
 app.use(cors());
+const supportEmailPreview = createSupportEmailPreview({
+  receivingAddress:process.env.EDEN_SUPPORT_PREVIEW_ADDRESS,
+  signingSecret:process.env.EDEN_SUPPORT_PREVIEW_WEBHOOK_SECRET,
+  receivingKey:process.env.EDEN_SUPPORT_PREVIEW_RESEND_KEY
+});
+app.post("/support/email/preview", express.raw({type:"application/json", limit:"64kb"}), async (req,res) => {
+  const result = await supportEmailPreview(req.body,req.headers);
+  res.set("Cache-Control","no-store").status(result.status).json(result.body);
+});
 app.use(express.json({
   verify(req, _res, buffer) {
     if (req.path === "/webhook" || req.path === "/eleven-postcall") {
