@@ -443,7 +443,7 @@ def review_handler(path, status, token, origin, wake, deliver=None, find_test_or
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "same-origin")
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
 
@@ -477,8 +477,12 @@ def review_handler(path, status, token, origin, wake, deliver=None, find_test_or
 <h2>Approved drafts</h2>{approved or "<p>No approved drafts yet.</p>"}</main></html>""")
 
         def do_POST(self):
+            request_origin = self.headers.get("Origin")
+            # Some browser form submissions suppress Origin. Fetch Metadata still
+            # identifies a same-origin navigation, and every action uses the private URL.
+            same_origin_form = request_origin in {None, "null"} and self.headers.get("Sec-Fetch-Site") == "same-origin"
             if (self.headers.get("Host") != origin.removeprefix("http://")
-                    or self.headers.get("Origin") != origin):
+                    or (request_origin != origin and not same_origin_form)):
                 return self.reply(403)
             if self.path == prefix + "check":
                 return self.send_status(check_now=True)
