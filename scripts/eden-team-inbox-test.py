@@ -5,6 +5,7 @@ import argparse
 from email import policy
 from email.parser import BytesParser
 from getpass import getpass
+from html.parser import HTMLParser
 import imaplib
 import json
 from pathlib import Path
@@ -14,18 +15,42 @@ import subprocess
 
 
 TEAM_ADDRESS = "team@clinicnet.live"
-TEST_SUBJECT = "Eden Team Inbox Test 2"
+TEST_SUBJECT = "Eden Team Inbox Test"
+TEST_SUBJECTS = {TEST_SUBJECT, TEST_SUBJECT + " 2"}
 TEST_SENDERS = {"verify@clinicnet.live", "steloa@protonmail.com"}
 TEST_QUESTION = "Hi Eden, where do I review a support access request?"
 MAX_TEST_BYTES = 65536
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def fetch_literal(mailbox, uid, section):
+def fetch_parts(mailbox, uid, section):
     status, parts = mailbox.uid("FETCH", uid, section)
     if status != "OK":
         raise RuntimeError("Proton Bridge could not read the test message.")
-    return next((part for part in parts if isinstance(part, tuple)), (b"", b""))
+    return parts
+
+
+def message_text(parts):
+    return next((part[1] for part in parts if isinstance(part, tuple)), b"")
+
+
+class PlainHTML(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.text = []
+
+    def handle_data(self, data):
+        self.text.append(data)
+
+
+def is_test_question(part):
+    text = part.get_content()
+    if part.get_content_type() == "text/html":
+        parser = PlainHTML()
+        parser.feed(text)
+        parser.close()
+        text = "".join(parser.text)
+    return " ".join(text.split()).rstrip("?").casefold() == TEST_QUESTION.rstrip("?").casefold()
 
 
 def read_test_message(mailbox):
@@ -37,13 +62,12 @@ def read_test_message(mailbox):
         raise RuntimeError("Proton Bridge could not search the team inbox.")
 
     parser = BytesParser(policy=policy.default)
-    for uid in reversed(matches[0].split()):
-        metadata, raw_headers = fetch_literal(
-            mailbox, uid, "(RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT MESSAGE-ID)])"
-        )
-        size = re.search(rb"\bRFC822\.SIZE (\d+)\b", metadata)
-        if not size or int(size[1]) > MAX_TEST_BYTES:
-            continue
+    uids = (matches[0] or b"").split() if matches else []
+    eligible = 0
+    for uid in reversed(uids):
+        raw_headers = message_text(fetch_parts(
+            mailbox, uid, "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT MESSAGE-ID)])"
+        ))
         headers = parser.parsebytes(raw_headers, headersonly=True)
         from_headers = headers.get_all("From", [])
         to_headers = headers.get_all("To", [])
@@ -53,15 +77,19 @@ def read_test_message(mailbox):
         sender = from_headers[0].addresses[0].addr_spec.lower()
         recipients = {address.addr_spec.lower() for address in to_headers[0].addresses}
         if (sender not in TEST_SENDERS or recipients != {TEAM_ADDRESS}
-                or headers["Subject"] != TEST_SUBJECT or len(message_ids) != 1
+                or headers["Subject"] not in TEST_SUBJECTS or len(message_ids) != 1
                 or not re.fullmatch(r"<[^<>\s]+>", message_ids[0])):
             continue
-        _, raw_message = fetch_literal(mailbox, uid, "BODY.PEEK[]")
-        part = parser.parsebytes(raw_message).get_body(preferencelist=("plain",))
-        if part is None or part.get_content().strip() != TEST_QUESTION:
-            continue
-        return {"sender": sender, "messageId": str(message_ids[0]), "text": TEST_QUESTION}
-    raise RuntimeError("The exact test email was not found in the team inbox.")
+        eligible += 1
+        raw_message = message_text(fetch_parts(mailbox, uid, f"(BODY.PEEK[]<0.{MAX_TEST_BYTES + 1}>)"))
+        if raw_message and len(raw_message) <= MAX_TEST_BYTES:
+            part = parser.parsebytes(raw_message).get_body(preferencelist=("plain", "html"))
+            if part is not None and is_test_question(part):
+                return {"sender": sender, "messageId": str(message_ids[0]), "text": TEST_QUESTION}
+    raise RuntimeError(
+        f"No matching test email in the team inbox. Subject matches: {len(uids)}. "
+        f"Matching sender, recipient and thread headers: {eligible}."
+    )
 
 
 def main():
