@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS send_test (
     delivery TEXT NOT NULL CHECK (delivery IN ('ready', 'sending', 'sent', 'failed', 'unknown', 'missing'))
 );
 INSERT OR IGNORE INTO send_test VALUES (1, 'ready');
+CREATE TABLE IF NOT EXISTS queue_changes (
+    id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO queue_changes VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS review_inserted AFTER INSERT ON review BEGIN
+    UPDATE queue_changes SET revision = revision + 1 WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS review_updated AFTER UPDATE ON review BEGIN
+    UPDATE queue_changes SET revision = revision + 1 WHERE id = 1;
+END;
 """
 
 
@@ -144,6 +154,20 @@ def route_message(raw):
     return message_id, sender, subject, body, result["body"], ""
 
 
+def auto_access_request(raw, review):
+    _, sender, _, body, draft, _ = review
+    question = " ".join(body.casefold().split())
+    if not draft or not re.fullmatch(r"(?:hi eden, )?where do i review a support access request\??", question):
+        return False
+    message = PARSER.parsebytes(raw, headersonly=True)
+    to = message.get_all("To", [])
+    reply_to = message.get_all("Reply-To", [])
+    if (len(to) != 1 or [address.addr_spec.lower() for address in to[0].addresses] != [TEAM]
+            or message.get("Cc") or message.get("Bcc") or len(reply_to) > 1):
+        return False
+    return not reply_to or [address.addr_spec.lower() for address in reply_to[0].addresses] == [sender]
+
+
 @contextlib.contextmanager
 def database(path):
     with contextlib.closing(sqlite3.connect(path, timeout=10)) as connection, connection:
@@ -161,6 +185,8 @@ def initialize_queue(path):
                 "ALTER TABLE review ADD COLUMN delivery TEXT NOT NULL DEFAULT 'ready' "
                 "CHECK (delivery IN ('ready', 'sending', 'sent', 'failed', 'unknown'))"
             )
+        if "automatic" not in columns:
+            connection.execute("ALTER TABLE review ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0")
 
 
 def build_reply(row):
@@ -179,6 +205,8 @@ def build_reply(row):
     message["Message-ID"] = make_msgid(domain="clinicnet.live")
     message["In-Reply-To"] = thread
     message["References"] = thread
+    if "automatic" in row.keys() and row["automatic"]:
+        message["Auto-Submitted"] = "auto-replied"
     message.set_content(row["draft"])
     return message
 
@@ -207,13 +235,15 @@ def deliver_reply(row, args, password, tls):
                 smtp.close()
 
 
-def approve_and_send(path, row_id, draft, deliver):
+def approve_and_send(path, row_id, draft, deliver, automatic=False):
+    eligible = "state = 'pending' AND delivery = 'ready'" if automatic else (
+        "state IN ('pending', 'approved') AND delivery IN ('ready', 'failed')"
+    )
     with database(path) as connection:
         claimed = connection.execute(
-            "UPDATE review SET state = 'approved', draft = ?, delivery = 'sending' "
-            "WHERE id = ? AND state IN ('pending', 'approved') "
-            "AND delivery IN ('ready', 'failed') AND draft != ''",
-            (draft, row_id),
+            "UPDATE review SET state = 'approved', draft = ?, delivery = 'sending', automatic = ? "
+            f"WHERE id = ? AND {eligible} AND draft != ''",
+            (draft, int(automatic), row_id),
         ).rowcount
         if not claimed:
             return
@@ -278,7 +308,7 @@ def inbox(args, password, tls):
         yield imap
 
 
-def scan(imap, path):
+def scan(imap, path, auto_reply=None):
     validity = int(imap.response("UIDVALIDITY")[1][0])
     with database(path) as connection:
         cursor = connection.execute("SELECT validity, last_uid FROM checkpoint WHERE id = 1").fetchone()
@@ -300,24 +330,30 @@ def scan(imap, path):
             raise RuntimeError("Bridge could not read a new message. It will retry.")
         raw = next((part[1] for part in parts if isinstance(part, tuple)), b"")
         review = route_message(raw) if raw else None
+        inserted_id = None
         with database(path) as connection:
             if review:
-                added += connection.execute(
+                inserted = connection.execute(
                     "INSERT OR IGNORE INTO review (message_id, sender, subject, context, draft, reason) "
                     "VALUES (?, ?, ?, ?, ?, ?)", review,
-                ).rowcount
+                )
+                if inserted.rowcount:
+                    added += 1
+                    inserted_id = inserted.lastrowid
             connection.execute("UPDATE checkpoint SET last_uid = MAX(last_uid, ?) WHERE id = 1", (uid,))
+        if auto_reply and inserted_id is not None and uid >= auto_reply[0] and auto_access_request(raw, review):
+            approve_and_send(path, inserted_id, review[4], auto_reply[1], automatic=True)
     return min(len(uids), BATCH), added
 
 
-def watch(args, password, tls, path, stopped, status, wake):
+def watch(args, password, tls, path, stopped, status, wake, auto_reply=None):
     while not stopped.is_set():
         try:
             status["message"] = "Checking the team inbox…"
             with inbox(args, password, tls) as imap:
-                scanned, added = scan(imap, path)
+                scanned, added = scan(imap, path, auto_reply)
             if scanned:
-                status["activity"] = f"Latest mail: {scanned} checked, {added} added to review."
+                status["activity"] = f"Latest mail: {scanned} checked, {added} added to the queue."
             status["message"] = "Watching for new team inbox mail"
         except (OSError, imaplib.IMAP4.error, subprocess.SubprocessError, ValueError, TypeError):
             status["message"] = "Inbox unavailable. Check that Bridge is open and connected. Retrying shortly."
@@ -420,6 +456,8 @@ def card(row, can_send):
             "failed": "Proton couldn’t accept this reply. Check Bridge and try again.",
             "unknown": "Delivery is uncertain. Check the original thread and Proton Sent.",
         }[delivery]
+        if delivery == "sent" and row["automatic"]:
+            label = "Automatic reply accepted by Proton for delivery"
         controls = f'<p>{label}</p><form method="post" action="./review"><input type="hidden" name="id" value="{row["id"]}">'
         if delivery in {"ready", "failed"} and can_send:
             controls += f'<label>Approved reply<textarea name="draft" required maxlength="6000">{escape(row["draft"])}</textarea></label>{send_button}'
@@ -457,7 +495,7 @@ def review_handler(path, status, token, origin, wake, deliver=None, find_test_or
             if self.path != prefix:
                 return self.reply(404)
             with database(path) as connection:
-                revision = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
+                revision = connection.execute("SELECT revision FROM queue_changes WHERE id = 1").fetchone()[0]
                 test = connection.execute("SELECT delivery FROM send_test WHERE id = 1").fetchone()[0]
                 pending, approved = (
                     "".join(card(row, deliver is not None) for row in connection.execute(
@@ -470,6 +508,7 @@ def review_handler(path, status, token, origin, wake, deliver=None, find_test_or
 <style>{STYLE}</style><script src="./review.js" defer></script><main data-revision="{revision}"><h1>Eden email review</h1>
 <p class="status" id="inbox-status">{escape(status["message"])}</p>
 <p>{'Approve &amp; send replies from ' + TEAM + '.' if deliver is not None else 'Save your approval here, then reply from Proton.'}</p>
+<p>{'Automatic replies on for new access-request questions.' if status.get("autoEnabled") else 'Automatic replies off.'}</p>
 <form id="check-form" action="./check" method="post"><button class="secondary" id="check-inbox">Check inbox now</button></form>
 <p id="refresh-result" role="status"></p>
 {pilot_panel(test) if find_test_original is not None else ''}
@@ -536,7 +575,7 @@ def review_handler(path, status, token, origin, wake, deliver=None, find_test_or
         def send_status(self, check_now=False):
             data = dict(status)
             with database(path) as connection:
-                data["revision"] = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
+                data["revision"] = connection.execute("SELECT revision FROM queue_changes WHERE id = 1").fetchone()[0]
             if check_now:
                 wake.set()
             self.reply(200, json.dumps(data), "application/json; charset=utf-8")
@@ -549,8 +588,11 @@ def main():
     args.add_argument("--certificate", required=True)
     args.add_argument("--port", required=True, type=int)
     args.add_argument("--smtp-port", type=int, help="Enable approved sending through the Bridge SMTP port")
+    args.add_argument("--auto-access-request", action="store_true", help="Automatically reply to new emails matching the access-request question")
     args.add_argument("--security", choices=("starttls", "ssl"), required=True)
     options = args.parse_args()
+    if options.auto_access_request and not options.smtp_port:
+        args.error("--auto-access-request requires --smtp-port")
     os.umask(0o077)
     directory = Path.home() / "Library" / "Application Support" / "Eden" / "Email Review"
     directory.mkdir(parents=True, exist_ok=True)
@@ -561,20 +603,22 @@ def main():
     # Trust only the Bridge certificate saved locally. Its name may differ from the loopback IP.
     tls.check_hostname = False
     password = getpass("Proton Bridge IMAP password: ")
+    deliver = (lambda row: deliver_reply(row, options, password, tls)) if options.smtp_port else None
     with inbox(options, password, tls) as imap:
+        auto_reply = (int(imap.response("UIDNEXT")[1][0]), deliver) if options.auto_access_request else None
         scanned, added = scan(imap, path)
     stopped = threading.Event()
     wake = threading.Event()
     status = {
         "message": "Watching for new team inbox mail",
-        "activity": f"Latest mail: {scanned} checked, {added} added to review." if scanned else "",
+        "activity": f"Latest mail: {scanned} checked, {added} added to the queue." if scanned else "",
         "checked": datetime.now().strftime("%H:%M:%S"),
         "checkCount": 1,
+        "autoEnabled": bool(auto_reply),
     }
     token = secrets.token_urlsafe(24)
     with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
         origin = f"http://127.0.0.1:{server.server_port}"
-        deliver = (lambda row: deliver_reply(row, options, password, tls)) if options.smtp_port else None
         read_test_message = runpy.run_path(str(ROOT / "scripts" / "eden-team-inbox-test.py"))["read_test_message"]
 
         def find_test_original():
@@ -584,7 +628,7 @@ def main():
         server.RequestHandlerClass = review_handler(
             path, status, token, origin, wake, deliver, find_test_original if deliver else None,
         )
-        thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status, wake), daemon=True)
+        thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status, wake, auto_reply), daemon=True)
         thread.start()
         url = f"{origin}/{token}/"
         print(f"Review Eden drafts at {url}\nLeave this window and Proton Bridge open. Press Ctrl+C to stop.", flush=True)
