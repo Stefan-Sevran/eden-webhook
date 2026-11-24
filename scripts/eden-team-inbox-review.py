@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Run a local, read-only Proton inbox watcher and Eden draft review queue."""
+"""Run the local Eden inbox watcher and review replies before sending."""
 
 import argparse
 import contextlib
 from datetime import datetime
 from email import policy
+from email.headerregistry import Address
+from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import formatdate, make_msgid
 from getpass import getpass
 from html import escape
 from html.parser import HTMLParser
@@ -16,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import smtplib
 import sqlite3
 import ssl
 import subprocess
@@ -137,6 +141,78 @@ def database(path):
     with contextlib.closing(sqlite3.connect(path, timeout=10)) as connection, connection:
         connection.row_factory = sqlite3.Row
         yield connection
+
+
+def initialize_queue(path):
+    with database(path) as connection:
+        connection.executescript(SCHEMA)
+        connection.execute("BEGIN IMMEDIATE")
+        columns = {column["name"] for column in connection.execute("PRAGMA table_info(review)")}
+        if "delivery" not in columns:
+            connection.execute(
+                "ALTER TABLE review ADD COLUMN delivery TEXT NOT NULL DEFAULT 'ready' "
+                "CHECK (delivery IN ('ready', 'sending', 'sent', 'failed', 'unknown'))"
+            )
+
+
+def build_reply(row):
+    recipient = Address(addr_spec=row["sender"])
+    if not recipient.username or not recipient.domain:
+        raise ValueError("Missing recipient")
+    thread = row["message_id"]
+    if not re.fullmatch(r"<[^<>\s]{1,998}>", thread):
+        raise ValueError("Invalid thread")
+    message = EmailMessage()
+    message["From"] = Address(display_name="Eden", addr_spec=TEAM)
+    message["To"] = recipient
+    message["Reply-To"] = TEAM
+    message["Subject"] = "Re: " + row["subject"] if row["subject"] else "Re: (No subject)"
+    message["Date"] = formatdate()
+    message["Message-ID"] = make_msgid(domain="clinicnet.live")
+    message["In-Reply-To"] = thread
+    message["References"] = thread
+    message.set_content(row["draft"])
+    return message
+
+
+def deliver_reply(row, args, password, tls):
+    smtp = None
+    attempted = False
+    try:
+        message = build_reply(row)
+        if args.security == "ssl":
+            smtp = smtplib.SMTP_SSL("127.0.0.1", args.smtp_port, context=tls, timeout=15)
+        else:
+            smtp = smtplib.SMTP("127.0.0.1", args.smtp_port, timeout=15)
+            smtp.starttls(context=tls)
+        smtp.login(TEAM, password)
+        attempted = True
+        smtp.send_message(message, from_addr=TEAM, to_addrs=[row["sender"]])
+        return "sent"
+    except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError, smtplib.SMTPNotSupportedError):
+        return "failed"
+    except (OSError, ValueError):
+        return "unknown" if attempted else "failed"
+    finally:
+        if smtp is not None:
+            with contextlib.suppress(OSError):
+                smtp.close()
+
+
+def approve_and_send(path, row_id, draft, deliver):
+    with database(path) as connection:
+        claimed = connection.execute(
+            "UPDATE review SET state = 'approved', draft = ?, delivery = 'sending' "
+            "WHERE id = ? AND state IN ('pending', 'approved') "
+            "AND delivery IN ('ready', 'failed') AND draft != ''",
+            (draft, row_id),
+        ).rowcount
+        if not claimed:
+            return
+        row = connection.execute("SELECT * FROM review WHERE id = ?", (row_id,)).fetchone()
+    result = deliver(row)
+    with database(path) as connection:
+        connection.execute("UPDATE review SET delivery = ? WHERE id = ? AND delivery = 'sending'", (result, row_id))
 
 
 @contextlib.contextmanager
@@ -273,30 +349,42 @@ setInterval(update, 3000);
 """
 
 
-def card(row):
+def card(row, can_send):
     heading = f"<h3>{escape(row['subject'] or '(No subject)')}</h3><small>{escape(row['sender'])}</small>"
     controls = ""
+    send_button = '<button name="action" value="send">Approve &amp; send</button> ' if can_send else ""
     if row["state"] == "pending":
         controls = f'<form method="post" action="./review"><input type="hidden" name="id" value="{row["id"]}">'
         if row["draft"]:
             controls += (
                 f'<details><summary>Original question</summary><pre>{escape(row["context"])}</pre></details>'
                 f'<label>Suggested reply<textarea name="draft" required maxlength="6000">{escape(row["draft"])}</textarea></label>'
-                '<button name="action" value="approved">Approve draft</button> '
+                + send_button + '<button class="secondary" name="action" value="approved">Save approval</button> '
             )
         else:
             controls += f"<p>{escape(row['reason'])}. Open the email in Proton.</p>"
         controls += '<button class="secondary" name="action" value="dismissed" formnovalidate>Dismiss</button></form>'
     elif row["state"] == "approved":
-        controls = (
-            f'<p>Ready to send from Proton</p><label>Approved reply<textarea readonly>{escape(row["draft"])}</textarea></label>'
-            f'<form method="post" action="./review"><input type="hidden" name="id" value="{row["id"]}">'
-            '<button class="secondary" name="action" value="archived">Clear from queue</button></form>'
-        )
+        delivery = row["delivery"]
+        label = {
+            "ready": "Approved",
+            "sending": "Send started. If this persists, check Proton Sent for the reply.",
+            "sent": "Accepted by Proton for delivery",
+            "failed": "Proton couldn’t accept this reply. Check Bridge and try again.",
+            "unknown": "Delivery is uncertain. Check the original thread and Proton Sent.",
+        }[delivery]
+        controls = f'<p>{label}</p><form method="post" action="./review"><input type="hidden" name="id" value="{row["id"]}">'
+        if delivery in {"ready", "failed"} and can_send:
+            controls += f'<label>Approved reply<textarea name="draft" required maxlength="6000">{escape(row["draft"])}</textarea></label>{send_button}'
+        else:
+            controls += f'<label>Approved reply<textarea readonly>{escape(row["draft"])}</textarea></label>'
+        if delivery != "sending":
+            controls += '<button class="secondary" name="action" value="archived" formnovalidate>Clear from queue</button>'
+        controls += '</form>'
     return f"<article>{heading}{controls}</article>"
 
 
-def review_handler(path, status, token, origin, wake):
+def review_handler(path, status, token, origin, wake, deliver=None):
     prefix = "/" + token + "/"
 
     class Handler(BaseHTTPRequestHandler):
@@ -324,7 +412,7 @@ def review_handler(path, status, token, origin, wake):
             with database(path) as connection:
                 revision = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
                 pending, approved = (
-                    "".join(card(row) for row in connection.execute(
+                    "".join(card(row, deliver is not None) for row in connection.execute(
                         "SELECT * FROM review WHERE state = ? ORDER BY id DESC LIMIT 100", (state,),
                     ))
                     for state in ("pending", "approved")
@@ -333,7 +421,7 @@ def review_handler(path, status, token, origin, wake):
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Eden email review</title>
 <style>{STYLE}</style><script src="./review.js" defer></script><main data-revision="{revision}"><h1>Eden email review</h1>
 <p class="status" id="inbox-status">{escape(status["message"])}</p>
-<p>Approve a draft here, then reply in Proton when you’re ready.</p>
+<p>{'Approve &amp; send replies from ' + TEAM + '.' if deliver is not None else 'Save your approval here, then reply from Proton.'}</p>
 <form id="check-form" action="./check" method="post"><button class="secondary" id="check-inbox">Check inbox now</button></form>
 <p id="refresh-result" role="status"></p>
 <h2>Needs review</h2>{pending or "<p>Nothing waiting for review.</p>"}
@@ -357,10 +445,21 @@ def review_handler(path, status, token, origin, wake):
             row_id = fields.get("id", [""])[0]
             action = fields.get("action", [""])[0]
             draft = fields.get("draft", [""])[0].strip()
-            if not re.fullmatch(r"[0-9]{1,18}", row_id) or action not in {"approved", "dismissed", "archived"}:
+            if not re.fullmatch(r"[0-9]{1,18}", row_id) or action not in {"approved", "dismissed", "archived", "send"}:
                 return self.reply(400)
-            if action == "approved" and not 0 < len(draft) <= 6000:
+            if action in {"approved", "send"} and not 0 < len(draft) <= 6000:
                 return self.reply(400)
+            if action == "send":
+                if deliver is None:
+                    return self.reply(403)
+                approve_and_send(path, row_id, draft, deliver)
+            else:
+                self.apply_review(row_id, draft, action)
+            self.send_response(303)
+            self.send_header("Location", prefix)
+            self.end_headers()
+
+        def apply_review(self, row_id, draft, action):
             with database(path) as connection:
                 if action == "approved":
                     connection.execute(
@@ -370,12 +469,10 @@ def review_handler(path, status, token, origin, wake):
                 else:
                     prior_state = "approved" if action == "archived" else "pending"
                     connection.execute(
-                        "UPDATE review SET state = 'dismissed', context = '', draft = '' WHERE id = ? AND state = ?",
+                        "UPDATE review SET state = 'dismissed', context = '', draft = '' "
+                        "WHERE id = ? AND state = ? AND delivery != 'sending'",
                         (row_id, prior_state),
                     )
-            self.send_response(303)
-            self.send_header("Location", prefix)
-            self.end_headers()
 
         def send_status(self, check_now=False):
             data = dict(status)
@@ -392,14 +489,14 @@ def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--certificate", required=True)
     args.add_argument("--port", required=True, type=int)
+    args.add_argument("--smtp-port", type=int, help="Enable approved sending through the Bridge SMTP port")
     args.add_argument("--security", choices=("starttls", "ssl"), required=True)
     options = args.parse_args()
     os.umask(0o077)
     directory = Path.home() / "Library" / "Application Support" / "Eden" / "Email Review"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "queue.sqlite3"
-    with database(path) as connection:
-        connection.executescript(SCHEMA)
+    initialize_queue(path)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     tls.load_verify_locations(cafile=options.certificate)
     # Trust only the Bridge certificate saved locally. Its name may differ from the loopback IP.
@@ -418,7 +515,8 @@ def main():
     token = secrets.token_urlsafe(24)
     with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
         origin = f"http://127.0.0.1:{server.server_port}"
-        server.RequestHandlerClass = review_handler(path, status, token, origin, wake)
+        deliver = (lambda row: deliver_reply(row, options, password, tls)) if options.smtp_port else None
+        server.RequestHandlerClass = review_handler(path, status, token, origin, wake, deliver)
         thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status, wake), daemon=True)
         thread.start()
         url = f"{origin}/{token}/"
