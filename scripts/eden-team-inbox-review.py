@@ -39,9 +39,9 @@ TEST_RECIPIENT = "steloa@protonmail.com"
 TEST_SUBJECT = "Eden Team Inbox Test"
 PARSER = BytesParser(policy=policy.default)
 DRAFT_JS = """
-const { draftEdenSupportEmail } = require('./eden-support-email');
+const { draftKnowledgeSupportEmail } = require('./eden-support-draft');
 const text = require('node:fs').readFileSync(0, 'utf8');
-process.stdout.write(JSON.stringify(draftEdenSupportEmail(text)));
+draftKnowledgeSupportEmail(text).then(result => process.stdout.write(JSON.stringify(result)));
 """
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS checkpoint (

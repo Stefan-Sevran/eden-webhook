@@ -1,5 +1,5 @@
 const { createHmac, timingSafeEqual } = require("node:crypto");
-const { draftEdenSupportEmail } = require("./eden-support-email");
+const { draftKnowledgeSupportEmail } = require("./eden-support-draft");
 
 function verifyResendEvent(raw, headers, secret, now) {
   const id = headers["svix-id"];
@@ -45,8 +45,7 @@ function createSupportEmailPreview({
       });
       if (!response.ok) return {status:502, body:{status:"receiving_unavailable"}};
       const received = await response.json();
-      const draft = draftEdenSupportEmail(typeof received?.text === "string" ? received.text : "");
-      // The response contains fixed guidance only. The original message stays with the mail provider.
+      const draft = await draftKnowledgeSupportEmail(typeof received?.text === "string" ? received.text : "");
       return {status:200, body:draft};
     } catch {
       return {status:502, body:{status:"receiving_unavailable"}};
