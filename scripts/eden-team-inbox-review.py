@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+from datetime import datetime
 from email import policy
 from email.parser import BytesParser
 from getpass import getpass
@@ -161,7 +162,7 @@ def scan(imap, path):
         if cursor is None:
             latest = int(imap.response("UIDNEXT")[1][0]) - 1
             connection.execute("INSERT INTO checkpoint VALUES (1, ?, ?)", (validity, latest))
-            return
+            return 0, 0
         if cursor["validity"] != validity:
             raise RuntimeError("The inbox changed identity. The watcher is paused to avoid reprocessing old mail.")
         last = cursor["last_uid"]
@@ -169,6 +170,7 @@ def scan(imap, path):
     if status != "OK":
         raise RuntimeError("Bridge could not search for new mail.")
     uids = sorted({int(uid) for uid in (result[0] or b"").split() if int(uid) > last})
+    added = 0
     for uid in uids[:BATCH]:
         status, parts = imap.uid("FETCH", str(uid), f"(BODY.PEEK[]<0.{MAX_EMAIL_BYTES + 1}>)")
         if status != "OK":
@@ -177,24 +179,31 @@ def scan(imap, path):
         review = route_message(raw) if raw else None
         with database(path) as connection:
             if review:
-                connection.execute(
+                added += connection.execute(
                     "INSERT OR IGNORE INTO review (message_id, sender, subject, context, draft, reason) "
                     "VALUES (?, ?, ?, ?, ?, ?)", review,
-                )
+                ).rowcount
             connection.execute("UPDATE checkpoint SET last_uid = MAX(last_uid, ?) WHERE id = 1", (uid,))
+    return min(len(uids), BATCH), added
 
 
-def watch(args, password, tls, path, stopped, status):
+def watch(args, password, tls, path, stopped, status, wake):
     while not stopped.is_set():
         try:
+            status["message"] = "Checking the team inbox…"
             with inbox(args, password, tls) as imap:
-                scan(imap, path)
+                scanned, added = scan(imap, path)
+            if scanned:
+                status["activity"] = f"Latest mail: {scanned} checked, {added} added to review."
             status["message"] = "Watching for new team inbox mail"
         except (OSError, imaplib.IMAP4.error, subprocess.SubprocessError, ValueError, TypeError):
             status["message"] = "Inbox unavailable. Check that Bridge is open and connected. Retrying shortly."
         except RuntimeError as error:
             status["message"] = str(error)
-        stopped.wait(INTERVAL)
+        status["checked"] = datetime.now().strftime("%H:%M:%S")
+        status["checkCount"] += 1
+        wake.wait(INTERVAL)
+        wake.clear()
 
 
 STYLE = """
@@ -207,6 +216,60 @@ margin:8px 0;padding:12px;border:1px solid #a0aabe;border-radius:8px;color:inher
 button,a.action{display:inline-block;font:inherit;padding:8px 13px;border:1px solid #18463e;border-radius:8px;
 background:#18463e;color:#fff;text-decoration:none;cursor:pointer}button.secondary,a.secondary{background:#fff;color:#18463e}
 button:focus-visible,a:focus-visible,textarea:focus-visible{outline:3px solid #6f54d2;outline-offset:2px}
+"""
+
+REVIEW_JS = """
+const refresh = document.querySelector('#check-inbox');
+const statusLine = document.querySelector('#inbox-status');
+const feedback = document.querySelector('#refresh-result');
+const form = document.querySelector('#check-form');
+const displayedRevision = Number(document.querySelector('main').dataset.revision);
+let editing = false;
+let checking = false;
+let lastRequestedCheck = null;
+document.addEventListener('input', event => {
+  if (event.target.matches('textarea[name="draft"]')) editing = true;
+});
+async function update(checkNow = false) {
+  if (checking) return;
+  checking = true;
+  if (checkNow) {
+    refresh.disabled = true;
+    feedback.textContent = 'Checking inbox…';
+  }
+  try {
+    const response = await fetch(checkNow ? './check' : './status',
+      checkNow ? {method: 'POST'} : {});
+    if (!response.ok) throw new Error('Inbox status unavailable');
+    const status = await response.json();
+    statusLine.textContent = [status.message, status.checked && 'Last checked ' + status.checked,
+      status.activity].filter(Boolean).join(' · ');
+    if (checkNow) {
+      lastRequestedCheck = status.checkCount;
+    } else if (lastRequestedCheck !== null && status.checkCount > lastRequestedCheck) {
+      lastRequestedCheck = null;
+      feedback.textContent = 'Inbox check finished.';
+    }
+    if (status.revision > displayedRevision) {
+      if (editing || document.activeElement.matches('textarea[name="draft"]')) {
+        feedback.textContent = 'New mail is ready. Finish your edit to see the updated queue.';
+      } else {
+        window.location.reload();
+      }
+    }
+  } catch {
+    feedback.textContent = 'Could not reach the review page. Check that Terminal is still open.';
+  } finally {
+    refresh.disabled = false;
+    checking = false;
+  }
+}
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  update(true);
+});
+update();
+setInterval(update, 3000);
 """
 
 
@@ -233,26 +296,33 @@ def card(row):
     return f"<article>{heading}{controls}</article>"
 
 
-def review_handler(path, status, token, origin):
+def review_handler(path, status, token, origin, wake):
     prefix = "/" + token + "/"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
-        def reply(self, status_code, body=""):
+        def reply(self, status_code, body="", content_type="text/html; charset=utf-8"):
             self.send_response(status_code)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'")
             self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
 
         def do_GET(self):
-            if self.headers.get("Host") != origin.removeprefix("http://") or self.path != prefix:
+            if self.headers.get("Host") != origin.removeprefix("http://"):
+                return self.reply(404)
+            if self.path == prefix + "review.js":
+                return self.reply(200, REVIEW_JS, "application/javascript; charset=utf-8")
+            if self.path == prefix + "status":
+                return self.send_status()
+            if self.path != prefix:
                 return self.reply(404)
             with database(path) as connection:
+                revision = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
                 pending, approved = (
                     "".join(card(row) for row in connection.execute(
                         "SELECT * FROM review WHERE state = ? ORDER BY id DESC LIMIT 100", (state,),
@@ -261,17 +331,22 @@ def review_handler(path, status, token, origin):
                 )
             self.reply(200, f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Eden email review</title>
-<style>{STYLE}</style><main><h1>Eden email review</h1>
-<p class="status">{escape(status["message"])}</p>
+<style>{STYLE}</style><script src="./review.js" defer></script><main data-revision="{revision}"><h1>Eden email review</h1>
+<p class="status" id="inbox-status">{escape(status["message"])}</p>
 <p>Approve a draft here, then reply in Proton when you’re ready.</p>
-<a class="action secondary" href="./">Refresh</a>
+<form id="check-form" action="./check" method="post"><button class="secondary" id="check-inbox">Check inbox now</button></form>
+<p id="refresh-result" role="status"></p>
 <h2>Needs review</h2>{pending or "<p>Nothing waiting for review.</p>"}
 <h2>Approved drafts</h2>{approved or "<p>No approved drafts yet.</p>"}</main></html>""")
 
         def do_POST(self):
             if (self.headers.get("Host") != origin.removeprefix("http://")
-                    or self.headers.get("Origin") != origin or self.path != prefix + "review"):
+                    or self.headers.get("Origin") != origin):
                 return self.reply(403)
+            if self.path == prefix + "check":
+                return self.send_status(check_now=True)
+            if self.path != prefix + "review":
+                return self.reply(404)
             content_length = self.headers.get("Content-Length", "")
             if not content_length.isdecimal() or not 0 < int(content_length) <= 100_000:
                 return self.reply(400)
@@ -302,6 +377,14 @@ def review_handler(path, status, token, origin):
             self.send_header("Location", prefix)
             self.end_headers()
 
+        def send_status(self, check_now=False):
+            data = dict(status)
+            with database(path) as connection:
+                data["revision"] = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
+            if check_now:
+                wake.set()
+            self.reply(200, json.dumps(data), "application/json; charset=utf-8")
+
     return Handler
 
 
@@ -323,14 +406,20 @@ def main():
     tls.check_hostname = False
     password = getpass("Proton Bridge IMAP password: ")
     with inbox(options, password, tls) as imap:
-        scan(imap, path)
+        scanned, added = scan(imap, path)
     stopped = threading.Event()
-    status = {"message": "Watching for new team inbox mail"}
+    wake = threading.Event()
+    status = {
+        "message": "Watching for new team inbox mail",
+        "activity": f"Latest mail: {scanned} checked, {added} added to review." if scanned else "",
+        "checked": datetime.now().strftime("%H:%M:%S"),
+        "checkCount": 1,
+    }
     token = secrets.token_urlsafe(24)
     with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
         origin = f"http://127.0.0.1:{server.server_port}"
-        server.RequestHandlerClass = review_handler(path, status, token, origin)
-        thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status), daemon=True)
+        server.RequestHandlerClass = review_handler(path, status, token, origin, wake)
+        thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status, wake), daemon=True)
         thread.start()
         url = f"{origin}/{token}/"
         print(f"Review Eden drafts at {url}\nLeave this window and Proton Bridge open. Press Ctrl+C to stop.", flush=True)
@@ -339,6 +428,7 @@ def main():
             server.serve_forever()
         finally:
             stopped.set()
+            wake.set()
 
 
 if __name__ == "__main__":
