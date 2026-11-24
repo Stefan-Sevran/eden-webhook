@@ -53,7 +53,7 @@ def is_test_question(part):
     return " ".join(text.split()).rstrip("?").casefold() == TEST_QUESTION.rstrip("?").casefold()
 
 
-def read_test_message(mailbox):
+def read_test_message(mailbox, subjects=TEST_SUBJECTS, senders=TEST_SENDERS):
     status, _ = mailbox.select("INBOX", readonly=True)
     if status != "OK":
         raise RuntimeError("Proton Bridge could not open the team inbox.")
@@ -76,8 +76,8 @@ def read_test_message(mailbox):
             continue
         sender = from_headers[0].addresses[0].addr_spec.lower()
         recipients = {address.addr_spec.lower() for address in to_headers[0].addresses}
-        if (sender not in TEST_SENDERS or recipients != {TEAM_ADDRESS}
-                or headers["Subject"] not in TEST_SUBJECTS or len(message_ids) != 1
+        if (sender not in senders or recipients != {TEAM_ADDRESS}
+                or headers["Subject"] not in subjects or len(message_ids) != 1
                 or not re.fullmatch(r"<[^<>\s]+>", message_ids[0])):
             continue
         eligible += 1

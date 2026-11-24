@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import secrets
 import smtplib
 import sqlite3
@@ -34,6 +35,8 @@ MAX_TEXT = 4000
 BATCH = 25
 INTERVAL = 30
 ROOT = Path(__file__).resolve().parent.parent
+TEST_RECIPIENT = "steloa@protonmail.com"
+TEST_SUBJECT = "Eden Team Inbox Test"
 PARSER = BytesParser(policy=policy.default)
 DRAFT_JS = """
 const { draftEdenSupportEmail } = require('./eden-support-email');
@@ -49,6 +52,11 @@ CREATE TABLE IF NOT EXISTS review (
     subject TEXT NOT NULL, context TEXT NOT NULL, draft TEXT NOT NULL, reason TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'dismissed'))
 );
+CREATE TABLE IF NOT EXISTS send_test (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    delivery TEXT NOT NULL CHECK (delivery IN ('ready', 'sending', 'sent', 'failed', 'unknown', 'missing'))
+);
+INSERT OR IGNORE INTO send_test VALUES (1, 'ready');
 """
 
 
@@ -213,6 +221,45 @@ def approve_and_send(path, row_id, draft, deliver):
     result = deliver(row)
     with database(path) as connection:
         connection.execute("UPDATE review SET delivery = ? WHERE id = ? AND delivery = 'sending'", (result, row_id))
+
+
+def send_pilot_reply(path, find_original, deliver):
+    with database(path) as connection:
+        claimed = connection.execute(
+            "UPDATE send_test SET delivery = 'sending' "
+            "WHERE id = 1 AND delivery IN ('ready', 'failed', 'missing')"
+        ).rowcount
+    if not claimed:
+        return
+    try:
+        original = find_original()
+    except RuntimeError:
+        result = "missing"
+    except (OSError, imaplib.IMAP4.error, TypeError, ValueError):
+        result = "failed"
+    else:
+        result = deliver({
+            "sender": TEST_RECIPIENT,
+            "subject": TEST_SUBJECT,
+            "message_id": original["messageId"],
+            "draft": "This is Eden’s one-time Proton delivery test. It’s safe to ignore this message.",
+        })
+    with database(path) as connection:
+        connection.execute("UPDATE send_test SET delivery = ? WHERE id = 1 AND delivery = 'sending'", (result,))
+
+
+def pilot_panel(delivery):
+    label = {
+        "ready": "Send a clearly labeled test reply to your original Eden Team Inbox Test thread.",
+        "sending": "The test is in progress. If this message persists, check Proton Sent.",
+        "sent": "Proton accepted the test reply. Look for it in the original Eden Team Inbox Test thread.",
+        "failed": "The test reply could not be sent. Check that Proton Bridge is open.",
+        "unknown": "Test delivery is uncertain. Check the original thread and Proton Sent.",
+        "missing": "The original test email could not be found in the team inbox.",
+    }[delivery]
+    button = ('<form method="post" action="./send-test"><button>Send one test reply</button></form>'
+              if delivery in {"ready", "failed", "missing"} else "")
+    return f"<h2>Proton delivery test</h2><article><p>{label}</p>{button}</article>"
 
 
 @contextlib.contextmanager
@@ -384,7 +431,7 @@ def card(row, can_send):
     return f"<article>{heading}{controls}</article>"
 
 
-def review_handler(path, status, token, origin, wake, deliver=None):
+def review_handler(path, status, token, origin, wake, deliver=None, find_test_original=None):
     prefix = "/" + token + "/"
 
     class Handler(BaseHTTPRequestHandler):
@@ -411,6 +458,7 @@ def review_handler(path, status, token, origin, wake, deliver=None):
                 return self.reply(404)
             with database(path) as connection:
                 revision = connection.execute("SELECT COALESCE(MAX(id), 0) FROM review").fetchone()[0]
+                test = connection.execute("SELECT delivery FROM send_test WHERE id = 1").fetchone()[0]
                 pending, approved = (
                     "".join(card(row, deliver is not None) for row in connection.execute(
                         "SELECT * FROM review WHERE state = ? ORDER BY id DESC LIMIT 100", (state,),
@@ -424,6 +472,7 @@ def review_handler(path, status, token, origin, wake, deliver=None):
 <p>{'Approve &amp; send replies from ' + TEAM + '.' if deliver is not None else 'Save your approval here, then reply from Proton.'}</p>
 <form id="check-form" action="./check" method="post"><button class="secondary" id="check-inbox">Check inbox now</button></form>
 <p id="refresh-result" role="status"></p>
+{pilot_panel(test) if find_test_original is not None else ''}
 <h2>Needs review</h2>{pending or "<p>Nothing waiting for review.</p>"}
 <h2>Approved drafts</h2>{approved or "<p>No approved drafts yet.</p>"}</main></html>""")
 
@@ -433,6 +482,9 @@ def review_handler(path, status, token, origin, wake, deliver=None):
                 return self.reply(403)
             if self.path == prefix + "check":
                 return self.send_status(check_now=True)
+            if self.path == prefix + "send-test" and deliver is not None and find_test_original is not None:
+                send_pilot_reply(path, find_test_original, deliver)
+                return self.redirect_home()
             if self.path != prefix + "review":
                 return self.reply(404)
             content_length = self.headers.get("Content-Length", "")
@@ -455,6 +507,9 @@ def review_handler(path, status, token, origin, wake, deliver=None):
                 approve_and_send(path, row_id, draft, deliver)
             else:
                 self.apply_review(row_id, draft, action)
+            self.redirect_home()
+
+        def redirect_home(self):
             self.send_response(303)
             self.send_header("Location", prefix)
             self.end_headers()
@@ -516,7 +571,15 @@ def main():
     with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
         origin = f"http://127.0.0.1:{server.server_port}"
         deliver = (lambda row: deliver_reply(row, options, password, tls)) if options.smtp_port else None
-        server.RequestHandlerClass = review_handler(path, status, token, origin, wake, deliver)
+        read_test_message = runpy.run_path(str(ROOT / "scripts" / "eden-team-inbox-test.py"))["read_test_message"]
+
+        def find_test_original():
+            with inbox(options, password, tls) as imap:
+                return read_test_message(imap, subjects={TEST_SUBJECT}, senders={TEST_RECIPIENT})
+
+        server.RequestHandlerClass = review_handler(
+            path, status, token, origin, wake, deliver, find_test_original if deliver else None,
+        )
         thread = threading.Thread(target=watch, args=(options, password, tls, path, stopped, status, wake), daemon=True)
         thread.start()
         url = f"{origin}/{token}/"
