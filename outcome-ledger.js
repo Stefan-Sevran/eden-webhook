@@ -129,6 +129,46 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
     });
   }
 
+  async function calendarPilotReservedSlots(locationId, first, last) {
+    const params = new URLSearchParams({
+      select: "slot_at", location_id: `eq.${locationId}`, slot_at: `gte.${first}`
+    });
+    params.append("slot_at", `lte.${last}`);
+    const rows = await database(`pearlsmile_calendar_claims?${params}`);
+    return rows.map(row => new Date(row.slot_at).toISOString());
+  }
+
+  async function calendarPilotClaim(locationId, start) {
+    const params = new URLSearchParams({
+      select: "request_id", location_id: `eq.${locationId}`, slot_at: `eq.${start}`, limit: "1"
+    });
+    const rows = await database(`pearlsmile_calendar_claims?${params}`);
+    return rows[0]?.request_id || null;
+  }
+
+  async function claimCalendarPilotSlot(locationId, start, requestId) {
+    const rows = await database("pearlsmile_calendar_claims", {
+      method: "POST",
+      headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify({ location_id: locationId, slot_at: start, request_id: requestId })
+    });
+    return rows.length > 0;
+  }
+
+  async function renewCalendarPilotAttempt(locationId, start, requestId) {
+    const now = Date.now();
+    const params = new URLSearchParams({
+      location_id: `eq.${locationId}`, slot_at: `eq.${start}`, request_id: `eq.${requestId}`,
+      attempt_until: `lte.${new Date(now).toISOString()}`
+    });
+    const rows = await database(`pearlsmile_calendar_claims?${params}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ attempt_until: new Date(now + 90_000).toISOString() })
+    });
+    return rows.length > 0;
+  }
+
   async function recordDemoInquiry(accountId, locationId) {
     const params = new URLSearchParams({
       select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`,
@@ -408,6 +448,7 @@ function createOutcomeLedger({ url, key, resendKey, fromEmail, guidedMessengerSe
   }
 
   return { enabled, record, list, listBookings, tenantLocation, connectedLocation, activateWebsiteConnection, recordDemoInquiry,
+    calendarPilotReservedSlots, calendarPilotClaim, claimCalendarPilotSlot, renewCalendarPilotAttempt,
     provisionVoiceConnection, voiceLocation, activateVoiceConnection, dispatch,
     provisionMessengerConnection, messengerLocation, activateMessengerConnection: activateVoiceConnection, commentDraft,
     commentDraftForReview, transitionCommentDraft,

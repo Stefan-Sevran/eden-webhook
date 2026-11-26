@@ -309,3 +309,34 @@ conversation counts when a visitor sends the matching code. A booking in that
 thread can retain the source for seven days. Untagged messages and visits from
 a click-to-Messenger ad are outside this count. Use a fresh test thread or
 finish any open staff case before running the tracked test.
+
+### PearlSmile calendar pilot
+
+Run this pilot on the staging webhook and a dedicated Google test calendar
+owned by the Google account authorizing the app. Patients do not use Google
+sign-in. A staff member with access to the staging workspace runs the
+fictional patient journey from the website preview.
+
+Apply `sql/pearlsmile-calendar-pilot.sql` in the staging database before
+enabling the pilot. Set `PEARLSMILE_TEST_ACCOUNT_ID` and
+`PEARLSMILE_TEST_LOCATION_ID` to a staging workspace location named
+`Test Location`. Set `PEARLSMILE_TEST_GOOGLE_CALENDAR_ID`,
+`PEARLSMILE_TEST_GOOGLE_CLIENT_ID`, `PEARLSMILE_TEST_GOOGLE_CLIENT_SECRET`,
+and `PEARLSMILE_TEST_GOOGLE_REFRESH_TOKEN` on the staging webhook. Authorize
+Google Calendar event and availability access for that test calendar account.
+Use a dedicated account with access limited to the test calendar. Keep the
+refresh token and client secret out of source control and chat.
+
+Open **Test PearlSmile calendar booking** in Daily Action. The test offers
+30-minute initial consultations between 10 a.m. and noon Cebu time on
+weekdays. Select an offered time. The chat acknowledges the reservation
+after the calendar event and the matching Daily Action row are saved. Verify
+the event in Google Calendar and the **Confirmed** row under **Booked**.
+To test conflicts, add a busy block before selecting an offered time or have
+two separate browser sessions choose the same slot. Run `node --test
+test/pearlsmile-calendar-pilot.test.js` for a simulated calendar run.
+
+Use one shared staff calendar for these test slots. Eden serializes its own
+claims and checks Google again before writing. A simultaneous manual edit in
+Google Calendar still requires coordination, since Google does not combine
+the availability check and event creation into one operation.
