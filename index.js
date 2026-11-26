@@ -10,6 +10,7 @@ const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
 const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
 const { sendSupportTestReply } = require("./support-email-test-reply");
 const { createSupportEmailPreview } = require("./support-email-inbound");
+const { createGooglePilotCalendar, createPearlSmileCalendarPilot } = require("./pearlsmile-calendar-pilot");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -71,6 +72,24 @@ const outcomeLedger = createOutcomeLedger({
   resendKey: process.env.RESEND_API_KEY,
   fromEmail: process.env.RESEND_FROM_EMAIL,
   guidedMessengerSetup
+});
+const pearlSmilePilotTarget = {
+  accountId: "76d85891-181d-4b99-a427-dd4dbc680e8a",
+  locationId: "b865c71a-e9f1-4b09-acb5-0b5043ab4307"
+};
+const pearlSmileCalendarTarget = {
+  accountId: process.env.PEARLSMILE_TEST_ACCOUNT_ID,
+  locationId: process.env.PEARLSMILE_TEST_LOCATION_ID
+};
+const pearlSmileCalendarPilot = createPearlSmileCalendarPilot({
+  target: pearlSmileCalendarTarget,
+  ledger: outcomeLedger,
+  calendar: createGooglePilotCalendar({
+    calendarId: process.env.PEARLSMILE_TEST_GOOGLE_CALENDAR_ID,
+    clientId: process.env.PEARLSMILE_TEST_GOOGLE_CLIENT_ID,
+    clientSecret: process.env.PEARLSMILE_TEST_GOOGLE_CLIENT_SECRET,
+    refreshToken: process.env.PEARLSMILE_TEST_GOOGLE_REFRESH_TOKEN
+  })
 });
 let clinicMessengerPages = new Map();
 try {
@@ -3368,7 +3387,7 @@ async function requireClinicUser(req, res, next) {
 function clinicRoute(handler) {
   return async (req, res) => {
     try {
-      return res.json(await handler(req));
+      return res.json(await handler(req, res));
     } catch (error) {
       console.error("Clinic request failed:", error.message);
       return res.sendStatus(error.status || 503);
@@ -3444,19 +3463,36 @@ app.get("/clinic/inbox", requireClinicUser,
       { locationId: req.query.locationId, limit: req.query.limit }))));
 // Fixed internal destination. Membership is checked with the staff token
 // before the service-role ledger can write the pre-defined sample.
-app.post("/clinic/pilots/pearlsmile", requireClinicUser, clinicRoute(async req => {
-  const accountId = "76d85891-181d-4b99-a427-dd4dbc680e8a";
-  const locationId = "b865c71a-e9f1-4b09-acb5-0b5043ab4307";
+async function requirePearlSmilePilot(req, enabled, target = pearlSmilePilotTarget) {
+  const { accountId, locationId } = target;
+  if (!enabled || !isUuid(accountId) || !isUuid(locationId)) {
+    throw Object.assign(new Error("PearlSmile pilot unavailable"), { status: 503 });
+  }
   const filter = new URLSearchParams({
     select: "id", id: `eq.${locationId}`, account_id: `eq.${accountId}`,
     name: "eq.Test Location"
   });
   const locations = await clinicTenantApi.request(req.clinicToken, `clinic_locations?${filter}`);
-  if (!locations.length || !outcomeLedger.enabled) {
-    const error = new Error("PearlSmile pilot unavailable");
-    error.status = locations.length ? 503 : 403;
-    throw error;
+  if (!locations.length) {
+    throw Object.assign(new Error("PearlSmile pilot unavailable"), { status: 403 });
   }
+  return target;
+}
+app.get("/clinic/pilots/pearlsmile/calendar", requireClinicUser, clinicRoute(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  await requirePearlSmilePilot(req, pearlSmileCalendarPilot.enabled, pearlSmileCalendarTarget);
+  return pearlSmileCalendarPilot.availability();
+}));
+app.post("/clinic/pilots/pearlsmile/calendar", requireClinicUser, clinicRoute(async req => {
+  await requirePearlSmilePilot(req, pearlSmileCalendarPilot.enabled, pearlSmileCalendarTarget);
+  const { start, requestId } = req.body || {};
+  if (typeof start !== "string" || !isUuid(requestId)) {
+    throw Object.assign(new Error("Choose a time to book."), { status: 400 });
+  }
+  return pearlSmileCalendarPilot.book(start, requestId.toLowerCase());
+}));
+app.post("/clinic/pilots/pearlsmile", requireClinicUser, clinicRoute(async req => {
+  const { accountId, locationId } = await requirePearlSmilePilot(req, outcomeLedger.enabled);
   const { stored } = await outcomeLedger.record({
     event_key: outcomeKey("pearlsmile_web_chat_pilot_v1", accountId, locationId),
     clinic_id: locationId, account_id: accountId, location_id: locationId,
