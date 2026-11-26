@@ -69,6 +69,16 @@ test("separate patients competing for a slot can only confirm one booking", asyn
   assert.equal(Array.from(outcomes.values())[0].details.appointmentAt, start);
 });
 
+test("availability can return a later Cebu date without mixing in earlier slots", async () => {
+  const { pilot } = fixture();
+  assert.ok(!(await pilot.availability()).slots.some(start => start.startsWith("2026-11-30")));
+  const { slots } = await pilot.availability("2026-11-30");
+  assert.equal(slots.length, 4);
+  assert.ok(slots.every(start => start.startsWith("2026-11-30")));
+  assert.deepEqual((await pilot.availability("2026-11-28")).slots, []);
+  await assert.rejects(pilot.availability(["2026-11-30"]), { status: 400 });
+});
+
 test("retries recover a calendar booking if Daily Action was briefly unavailable", async () => {
   const { pilot, failNextLedger, outcomes, writes } = fixture();
   const { slots: [start] } = await pilot.availability();

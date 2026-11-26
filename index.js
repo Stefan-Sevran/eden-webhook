@@ -3481,7 +3481,7 @@ async function requirePearlSmilePilot(req, enabled, target = pearlSmilePilotTarg
 app.get("/clinic/pilots/pearlsmile/calendar", requireClinicUser, clinicRoute(async (req, res) => {
   res.set("Cache-Control", "no-store");
   await requirePearlSmilePilot(req, pearlSmileCalendarPilot.enabled, pearlSmileCalendarTarget);
-  return pearlSmileCalendarPilot.availability();
+  return pearlSmileCalendarPilot.availability(req.query.date);
 }));
 app.post("/clinic/pilots/pearlsmile/calendar", requireClinicUser, clinicRoute(async req => {
   await requirePearlSmilePilot(req, pearlSmileCalendarPilot.enabled, pearlSmileCalendarTarget);

@@ -102,8 +102,12 @@ function createGooglePilotCalendar({ calendarId, clientId, clientSecret, refresh
 function createPearlSmileCalendarPilot({ calendar, ledger, target, now = Date.now }) {
   const enabled = Boolean(calendar.enabled && ledger.enabled);
 
-  async function availability() {
-    const slots = pilotSlots(now());
+  async function availability(date) {
+    if (date !== undefined && (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date))) {
+      throw bookingError(400, "Choose a valid consultation date.");
+    }
+    const slots = pilotSlots(now()).filter(start => !date ||
+      new Date(Date.parse(start) + MANILA_OFFSET).toISOString().startsWith(date));
     if (!slots.length) return { service: SERVICE, timeZone: TIME_ZONE, slots: [] };
     const [busy, reserved] = await Promise.all([
       calendar.busy(slots[0], endOf(slots.at(-1))),
