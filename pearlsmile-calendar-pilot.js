@@ -163,7 +163,8 @@ function createPearlSmileCalendarPilot({ calendar, ledger, target, now = Date.no
       details: { bookingId: id, demo: true, service: SERVICE,
         appointmentAt: start, appointmentEndsAt: end, calendarEventId: id }
     });
-    return { status: "CONFIRMED", service: SERVICE, start, end, timeZone: TIME_ZONE };
+    return { status: "CONFIRMED", service: SERVICE, start, end, timeZone: TIME_ZONE,
+      accountId: target.accountId, locationId: target.locationId };
   }
 
   return { enabled, availability, book };
