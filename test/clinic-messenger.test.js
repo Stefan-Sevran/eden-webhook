@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { createHmac } = require("node:crypto");
 const { createClinicMessenger, parseClinicPages } = require("../clinic-messenger");
 const { createCommentPilot, parseCommentPilot } = require("../clinic-comment-pilot");
+const { createPearlSmileMessengerPilot } = require("../pearlsmile-messenger-pilot");
 
 const pageId = "1234567890", appId = "9876543210", sender = "5555512345";
 const accountId = "9e939ec0-b740-448e-8a92-886548e922e2";
@@ -17,7 +18,7 @@ function payload(mid, text, at = timestamp, page = pageId) {
   }] }] };
 }
 
-function fixture(commentConfig, readSetupTest, modelDraft) {
+function fixture(commentConfig, readSetupTest, modelDraft, calendarPilot) {
   const turns = new Map(), cases = new Map(), sends = [], modelInputs = [];
   const route = { account_id: accountId, location_id: locationId, status: "verifying", location: { alert_email: "clinic@example.test" } };
   let connected = true, staffAction, sendFails = false;
@@ -72,7 +73,7 @@ function fixture(commentConfig, readSetupTest, modelDraft) {
     getPage: id => id === pageId ? page : null, now: () => clock.now });
   const make = () => createClinicMessenger({
     pages: new Map([[pageId, page]]), appId, appSecret: "app-secret", ledger, openaiKey: "ai-key", now: () => clock.now,
-    logger: { warn() {} }, recordOutcome, commentPilot, readSetupTest,
+    logger: { warn() {} }, recordOutcome, commentPilot, readSetupTest, calendarPilot,
     async fetchImpl(url, options) {
       if (url.includes("api.openai.com")) {
         const body = JSON.parse(options.body);
@@ -106,6 +107,34 @@ test("clinic Page config cannot replace Eden's Page or point to an invalid tenan
   assert.equal(parseClinicPages(undefined, pageId).size, 0);
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: page }), pageId));
   assert.throws(() => parseClinicPages(JSON.stringify({ [pageId]: { ...page, locationId: "other" } }), "999999"));
+});
+
+test("a Messenger calendar pilot offers alternatives to a busy slot and books only after consent", async () => {
+  const open = ["2026-11-09T02:00:00.000Z", "2026-11-09T03:00:00.000Z"];
+  const writes = [];
+  const calendar = { enabled: true,
+    async availability(date) { assert.equal(date, "2026-11-09"); return { slots: open }; },
+    async book(start, requestId, channel) {
+      writes.push({ start, requestId, channel });
+      return { status: "CONFIRMED", start };
+    } };
+  const pilot = createPearlSmileMessengerPilot({ pageId, target: { accountId, locationId }, calendar });
+  assert.equal(pilot.matches(pageId, { account_id: accountId, location_id: "other" }), false);
+  const f = fixture(null, null, null, pilot);
+  await f.make().processPayload(payload("calendar-offer", "Can I book Monday at 10:30 a.m.?"));
+  assert.match(f.sends[0].message.text, /time isn’t available[\s\S]*10:00[\s\S]*11:00/);
+  await f.make().processPayload(payload("calendar-choose", "I’ll take the second"));
+  assert.match(f.sends[1].message.text, /11:00.*Shall I book/);
+  assert.deepEqual(writes, []);
+  await f.make().processPayload(payload("calendar-confirm", "Yes, book it"));
+  await f.make().processPayload(payload("calendar-confirm", "Yes, book it"));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].start, open[1]);
+  assert.equal(writes[0].channel, "facebook_messenger");
+  assert.match(f.sends[2].message.text, /^Confirmed!/);
+  assert.equal(f.sends.length, 3);
+  assert.equal(f.cases.size, 0);
+  assert.equal(f.modelInputs.length, 0);
 });
 
 test("Messenger uses the confirmed facts and respects the clinic's appointment handling", async () => {

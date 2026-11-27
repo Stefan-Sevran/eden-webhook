@@ -13,6 +13,7 @@ const { createSupportEmailPreview } = require("./support-email-inbound");
 const { createGooglePilotCalendar, createPearlSmileCalendarPilot, createPearlSmilePatientLinks } =
   require("./pearlsmile-calendar-pilot");
 const { createPearlSmileVoiceSession } = require("./pearlsmile-voice-session");
+const { createPearlSmileMessengerPilot } = require("./pearlsmile-messenger-pilot");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -123,6 +124,10 @@ const commentPilot = createCommentPilot({ config: commentPilotConfig, ledger: ou
 const clinicMessenger = createClinicMessenger({
   pages: clinicMessengerPages, appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   ledger: outcomeLedger, recordOutcome: recordClinicOutcome, openaiKey: OPENAI_API_KEY, commentPilot,
+  calendarPilot: process.env.RENDER_SERVICE_NAME === "eden-webhook-staging" ? createPearlSmileMessengerPilot({
+    pageId: process.env.PEARLSMILE_TEST_MESSENGER_PAGE_ID,
+    target: pearlSmileCalendarTarget, calendar: pearlSmileCalendarPilot
+  }) : undefined,
   getStoredPageToken: (pageId, route) => messengerConnect.pageToken(pageId, route),
   readSetupTest: (...args) => messengerConnect.readSetupTest(...args)
 });

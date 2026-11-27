@@ -80,6 +80,16 @@ test("availability can return a later Cebu date without mixing in earlier slots"
   await assert.rejects(pilot.availability(["2026-11-30"]), { status: 400 });
 });
 
+test("web bookings block Messenger offers and the next reservation records the Messenger source", async () => {
+  const { pilot, outcomes } = fixture();
+  const { slots: [first, second] } = await pilot.availability();
+  await pilot.book(first, "website");
+  assert.ok(!(await pilot.availability()).slots.includes(first));
+  await assert.rejects(pilot.book(first, "messenger", "facebook_messenger"), { status: 409 });
+  await pilot.book(second, "messenger", "facebook_messenger");
+  assert.deepEqual([...outcomes.values()].map(row => row.channel), ["website_chat", "facebook_messenger"]);
+});
+
 test("a patient link expires and cannot be forged or accepted for a different location", () => {
   let time = Date.parse("2026-11-26T01:00:00Z");
   const options = { secret: "fixture patient signing key with 32 bytes", now: () => time,

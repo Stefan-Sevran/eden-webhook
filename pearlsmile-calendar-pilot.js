@@ -144,7 +144,7 @@ function createPearlSmileCalendarPilot({ calendar, ledger, target, now = Date.no
       slots: slots.filter(slot => !claimed.has(slot) && !isBusy(slot, busy)).slice(0, 6) };
   }
 
-  async function book(start, requestId) {
+  async function book(start, requestId, channel = "website_chat") {
     const timestamp = Date.parse(start);
     if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== start) {
       throw bookingError(409, "Choose a fresh consultation time.");
@@ -188,7 +188,7 @@ function createPearlSmileCalendarPilot({ calendar, ledger, target, now = Date.no
 
     await ledger.record({
       event_key: id, account_id: target.accountId, location_id: target.locationId, clinic_id: target.locationId,
-      channel: "website_chat", kind: "booking.updated", status: "CONFIRMED",
+      channel, kind: "booking.updated", status: "CONFIRMED",
       summary: "PearlSmile Cebu test · Initial consultation",
       details: { bookingId: id, demo: true, service: SERVICE,
         appointmentAt: start, appointmentEndsAt: end, calendarEventId: id }

@@ -162,6 +162,24 @@ function calendarDay(quote, timeZone, received) {
   return new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" }).format(date);
 }
 
+function pilotCalendarPreference(text, received) {
+  const zone = "Asia/Manila";
+  const dates = [...text.matchAll(dayMention)].map(match => {
+    const day = concreteChangeDay(match[1].replace(/^next /i, ""), zone, received);
+    return day ? new Date(Date.parse(day + " UTC")).toISOString().slice(0, 10) : null;
+  });
+  if (dates.includes(null) || new Set(dates).size > 1) return { invalid: true };
+  const clock = text.match(clockMention)?.[0]?.toLowerCase();
+  let time;
+  if (clock === "noon" || clock === "midnight") time = clock === "noon" ? "12:00" : "00:00";
+  else if (clock) {
+    const [, hour, minute, meridiem] = /^(\d{1,2})(?::(\d{2}))?\s*([ap])?/.exec(clock);
+    const hour24 = meridiem ? Number(hour) % 12 + (meridiem === "p" ? 12 : 0) : Number(hour);
+    time = String(hour24).padStart(2, "0") + ":" + (minute || "00");
+  }
+  return { date: dates[0], time };
+}
+
 function bookingPreference(draft, text, previous, timeZone, received, collecting, shortReply) {
   const days = collecting ? [...text.matchAll(dayMention)] : [];
   const dateAlternatives = /\b(?:or|either|instead of|except|can['’]t|cannot|not)\b/i.test(text);
@@ -264,7 +282,7 @@ function metaErrorHint(message) {
   return "";
 }
 
-function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot, readSetupTest,
+function createClinicMessenger({ pages, appId, appSecret, ledger, recordOutcome, openaiKey, getStoredPageToken, commentPilot, readSetupTest, calendarPilot,
   fetchImpl = fetch, now = Date.now, logger = console }) {
   const processors = new Map();
   const recentConversations = new Map();
@@ -647,6 +665,21 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         case_key: outcomeKey("clinic_messenger_case", eventKey)
       });
     }
+    if (!turn && !testId && calendarPilot?.matches(pageId, route)) {
+      const previous = await ledger.recentMessengerTurn(conversationKey);
+      if (previous && Date.parse(previous.received_at) > received) return;
+      const active = previous && Date.parse(previous.received_at) > received - day;
+      const draft = hasAttachment ? { intent: "answer", reply: "Please send the day and time as text for this booking test.",
+        calendarPilot: active ? previous.draft.calendarPilot || {} : {} } : await calendarPilot.respond({
+        text, preference: pilotCalendarPreference(text, received),
+        previous: active ? previous.draft.calendarPilot : null,
+        previousSent: active && previous.state === "sent"
+      });
+      turn = await ledger.prepareMessengerTurn({
+        event_key: eventKey, conversation_key: conversationKey,
+        received_at: new Date(received).toISOString(), draft, case_key: null
+      });
+    }
     if (!turn) {
       const previous = await ledger.recentMessengerTurn(conversationKey);
       if (previous && Date.parse(previous.received_at) > received) return;
@@ -696,7 +729,8 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
     }
     const commentSource = turn.draft.commentSource;
     if (commentSource?.received === received) await commentPilot?.recordStarted(route, conversationKey, commentSource);
-    const canActivate = route.status === "verifying" && Boolean(turn.case_key);
+    const isCalendarPilot = Boolean(turn.draft.calendarPilot);
+    const canActivate = route.status === "verifying" && Boolean(turn.case_key || isCalendarPilot);
     const saveCase = async (key, intent) => {
       const { requestAction, targetCaseKey } = turn.draft;
       const related = requestAction && targetCaseKey;
@@ -730,8 +764,8 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
         throw Error("Messenger reply is still in flight");
       }
       const key = turn.case_key || outcomeKey("clinic_messenger_case", eventKey);
-      if (!testId) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
-      await ledger.updateMessengerTurn(eventKey, turn.state, "needs_review", key);
+      if (!testId && !isCalendarPilot) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
+      await ledger.updateMessengerTurn(eventKey, turn.state, "needs_review", isCalendarPilot ? null : key);
       return;
     }
     if (turn.case_key && !testId) await saveCase(turn.case_key, turn.draft.intent);
@@ -748,8 +782,8 @@ ${facts ? JSON.stringify(facts) : page.facts}` },
       if (!send.message_id) throw Error("Meta did not confirm the reply");
     } catch {
       const key = turn.case_key || outcomeKey("clinic_messenger_case", eventKey);
-      if (!testId) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
-      await ledger.updateMessengerTurn(eventKey, "sending", "needs_review", key);
+      if (!testId && !isCalendarPilot) await saveCase(key, turn.draft.intent === "booking" ? "booking" : "handoff");
+      await ledger.updateMessengerTurn(eventKey, "sending", "needs_review", isCalendarPilot ? null : key);
       logger.warn("Clinic Messenger reply needs staff review");
       return;
     }

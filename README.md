@@ -343,6 +343,14 @@ it in an incognito window. It expires after one hour and can reserve one
 fictional consultation. Verify the appointment in Google Calendar and in
 Daily Action under **Booked**. Keep the signing key and test links private.
 
+For the Messenger calendar test, use a dedicated Meta development app and test
+Page connected to the same Test Location via the Clinic Messenger pilot setup
+above. Set `PEARLSMILE_TEST_MESSENGER_PAGE_ID` to that Page's ID on
+`eden-webhook-staging`. Ask for a consultation time already booked on the web,
+choose an offered alternative, and reply **Yes** after the exact time is read
+back. Verify one event in the test calendar and a confirmed Facebook Messenger
+appointment in Daily Action.
+
 Use one shared staff calendar for these test slots. Eden serializes its own
 claims and checks Google again before writing. A simultaneous manual edit in
 Google Calendar still requires coordination, since Google does not combine
