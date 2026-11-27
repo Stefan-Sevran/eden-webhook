@@ -3504,15 +3504,18 @@ app.post("/clinic/pilots/pearlsmile/patient-link", requireClinicUser, clinicRout
     pearlSmileCalendarTarget);
   return { token: pearlSmilePatientLinks.create() };
 }));
+function authorizePearlSmilePatient(req) {
+  if (!pearlSmileCalendarPilot.enabled || req.get("origin") !== pearlSmilePatientPreview) {
+    throw Object.assign(new Error("PearlSmile patient pilot unavailable"), { status: 403 });
+  }
+  const requestId = pearlSmilePatientLinks.read(/^Bearer (\S+)$/i.exec(req.get("authorization") || "")?.[1]);
+  if (!requestId) throw Object.assign(new Error("Invalid or expired PearlSmile patient link"), { status: 401 });
+  return requestId;
+}
 function pearlSmilePatientRequest(handler) {
   return clinicRoute(async (req, res) => {
     res.set("Cache-Control", "no-store");
-    if (!pearlSmileCalendarPilot.enabled || req.get("origin") !== pearlSmilePatientPreview) {
-      throw Object.assign(new Error("PearlSmile patient pilot unavailable"), { status: 403 });
-    }
-    const requestId = pearlSmilePatientLinks.read(/^Bearer (\S+)$/i.exec(req.get("authorization") || "")?.[1]);
-    if (!requestId) throw Object.assign(new Error("Invalid or expired PearlSmile patient link"), { status: 401 });
-    return handler(req, requestId);
+    return handler(req, authorizePearlSmilePatient(req));
   });
 }
 app.get("/pilots/pearlsmile/patient-calendar", pearlSmilePatientRequest(req =>
@@ -3523,6 +3526,46 @@ app.post("/pilots/pearlsmile/patient-calendar", pearlSmilePatientRequest(async (
   const { status, service, end, timeZone } = await pearlSmileCalendarPilot.book(start, requestId);
   return { status, service, start, end, timeZone };
 }));
+const pearlSmileVoiceStarts = new Map();
+app.post("/pilots/pearlsmile/patient-voice", express.text({ type: "application/sdp", limit: "32kb" }),
+  async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    try {
+      const requestId = authorizePearlSmilePatient(req);
+      if (!OPENAI_API_KEY) return res.sendStatus(503);
+      if (typeof req.body !== "string" || !req.body.startsWith("v=0")) return res.sendStatus(400);
+      const now = Date.now();
+      for (const [id, attempt] of pearlSmileVoiceStarts) {
+        if (attempt.expires <= now) pearlSmileVoiceStarts.delete(id);
+      }
+      const attempt = pearlSmileVoiceStarts.get(requestId) || { count: 0, expires: now + 60 * 60_000 };
+      if (attempt.count >= 3) return res.sendStatus(429);
+      attempt.count++;
+      pearlSmileVoiceStarts.set(requestId, attempt);
+      const form = new FormData();
+      form.append("sdp", req.body);
+      form.append("session", JSON.stringify({
+        type: "realtime", model: "gpt-realtime", output_modalities: ["audio"], tools: [],
+        instructions: "You are Maria at PearlSmile Dental. Read the provided line clearly and verbatim. Never add a claim about a booking.",
+        audio: {
+          input: { transcription: { model: "gpt-4o-mini-transcribe", language: "en" },
+            turn_detection: { type: "server_vad", create_response: false, interrupt_response: false } },
+          output: { voice: "marin" }
+        }
+      }));
+      const upstream = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST", headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }, body: form,
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (!upstream.ok) {
+        console.error("PearlSmile realtime session HTTP", upstream.status);
+        return res.sendStatus(502);
+      }
+      return res.type("application/sdp").send(await upstream.text());
+    } catch (error) {
+      return res.sendStatus(error.status || 503);
+    }
+  });
 app.post("/clinic/pilots/pearlsmile", requireClinicUser, clinicRoute(async req => {
   const { accountId, locationId } = await requirePearlSmilePilot(req, outcomeLedger.enabled);
   const { stored } = await outcomeLedger.record({
