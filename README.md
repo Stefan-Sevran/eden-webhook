@@ -336,6 +336,13 @@ To test conflicts, add a busy block before selecting an offered time or have
 two separate browser sessions choose the same slot. Run `node --test
 test/pearlsmile-calendar-pilot.test.js` for a simulated calendar run.
 
+For the patient-mode test, set `PEARLSMILE_PATIENT_PILOT_KEY` to a random
+server-only value of at least 32 characters on `eden-webhook-staging`.
+From Test Location's Daily Action screen, create a patient test link and open
+it in an incognito window. It expires after one hour and can reserve one
+fictional consultation. Verify the appointment in Google Calendar and in
+Daily Action under **Booked**. Keep the signing key and test links private.
+
 Use one shared staff calendar for these test slots. Eden serializes its own
 claims and checks Google again before writing. A simultaneous manual edit in
 Google Calendar still requires coordination, since Google does not combine

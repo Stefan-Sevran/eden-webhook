@@ -1,4 +1,5 @@
 const { outcomeKey } = require("./outcome-ledger");
+const { createHmac, randomUUID, timingSafeEqual } = require("node:crypto");
 
 const SERVICE = "Initial consultation";
 const TIME_ZONE = "Asia/Manila";
@@ -32,6 +33,31 @@ function isBusy(start, intervals) {
 
 function bookingError(status, message) {
   return Object.assign(new Error(message), { status });
+}
+
+function createPearlSmilePatientLinks({ secret, target, now = Date.now }) {
+  const enabled = typeof secret === "string" && secret.length >= 32;
+  const lifetime = 60 * 60_000;
+  const sign = payload => createHmac("sha256", secret)
+    .update(`pearlsmile-patient-v1:${target.accountId}:${target.locationId}:${payload}`)
+    .digest();
+
+  function create() {
+    const payload = `${randomUUID()}.${now() + lifetime}`;
+    return `${payload}.${sign(payload).toString("base64url")}`;
+  }
+
+  function read(token) {
+    if (!enabled || typeof token !== "string") return null;
+    const match = /^([a-f0-9-]{36})\.(\d{13})\.([A-Za-z0-9_-]{43})$/.exec(token);
+    if (!match) return null;
+    const [, requestId, expiry, signature] = match;
+    if (Number(expiry) <= now() ||
+        !timingSafeEqual(sign(`${requestId}.${expiry}`), Buffer.from(signature, "base64url"))) return null;
+    return requestId;
+  }
+
+  return { enabled, create, read };
 }
 
 function createGooglePilotCalendar({ calendarId, clientId, clientSecret, refreshToken, fetchImpl = fetch }) {
@@ -174,4 +200,4 @@ function createPearlSmileCalendarPilot({ calendar, ledger, target, now = Date.no
   return { enabled, availability, book };
 }
 
-module.exports = { createGooglePilotCalendar, createPearlSmileCalendarPilot };
+module.exports = { createGooglePilotCalendar, createPearlSmileCalendarPilot, createPearlSmilePatientLinks };

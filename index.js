@@ -10,7 +10,8 @@ const { E164, AGENT_ID, voiceIdentity } = require("./voice-routing");
 const { createClinicTenantApi, isUuid } = require("./clinic-tenant");
 const { sendSupportTestReply } = require("./support-email-test-reply");
 const { createSupportEmailPreview } = require("./support-email-inbound");
-const { createGooglePilotCalendar, createPearlSmileCalendarPilot } = require("./pearlsmile-calendar-pilot");
+const { createGooglePilotCalendar, createPearlSmileCalendarPilot, createPearlSmilePatientLinks } =
+  require("./pearlsmile-calendar-pilot");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -81,6 +82,12 @@ const pearlSmileCalendarTarget = {
   accountId: process.env.PEARLSMILE_TEST_ACCOUNT_ID,
   locationId: process.env.PEARLSMILE_TEST_LOCATION_ID
 };
+const pearlSmilePatientPreview = "https://codex-ask-eden-preview.clinicnet-web.pages.dev";
+const pearlSmilePatientLinks = createPearlSmilePatientLinks({
+  secret: process.env.RENDER_SERVICE_NAME === "eden-webhook-staging"
+    ? process.env.PEARLSMILE_PATIENT_PILOT_KEY : undefined,
+  target: pearlSmileCalendarTarget
+});
 const pearlSmileCalendarPilot = createPearlSmileCalendarPilot({
   target: pearlSmileCalendarTarget,
   ledger: outcomeLedger,
@@ -3490,6 +3497,31 @@ app.post("/clinic/pilots/pearlsmile/calendar", requireClinicUser, clinicRoute(as
     throw Object.assign(new Error("Choose a time to book."), { status: 400 });
   }
   return pearlSmileCalendarPilot.book(start, requestId.toLowerCase());
+}));
+app.post("/clinic/pilots/pearlsmile/patient-link", requireClinicUser, clinicRoute(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  await requirePearlSmilePilot(req, pearlSmileCalendarPilot.enabled && pearlSmilePatientLinks.enabled,
+    pearlSmileCalendarTarget);
+  return { token: pearlSmilePatientLinks.create() };
+}));
+function pearlSmilePatientRequest(handler) {
+  return clinicRoute(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!pearlSmileCalendarPilot.enabled || req.get("origin") !== pearlSmilePatientPreview) {
+      throw Object.assign(new Error("PearlSmile patient pilot unavailable"), { status: 403 });
+    }
+    const requestId = pearlSmilePatientLinks.read(/^Bearer (\S+)$/i.exec(req.get("authorization") || "")?.[1]);
+    if (!requestId) throw Object.assign(new Error("Invalid or expired PearlSmile patient link"), { status: 401 });
+    return handler(req, requestId);
+  });
+}
+app.get("/pilots/pearlsmile/patient-calendar", pearlSmilePatientRequest(req =>
+  pearlSmileCalendarPilot.availability(req.query.date)));
+app.post("/pilots/pearlsmile/patient-calendar", pearlSmilePatientRequest(async (req, requestId) => {
+  const { start } = req.body || {};
+  if (typeof start !== "string") throw Object.assign(new Error("Choose a time to book."), { status: 400 });
+  const { status, service, end, timeZone } = await pearlSmileCalendarPilot.book(start, requestId);
+  return { status, service, start, end, timeZone };
 }));
 app.post("/clinic/pilots/pearlsmile", requireClinicUser, clinicRoute(async req => {
   const { accountId, locationId } = await requirePearlSmilePilot(req, outcomeLedger.enabled);

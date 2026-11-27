@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createGooglePilotCalendar, createPearlSmileCalendarPilot } = require("../pearlsmile-calendar-pilot");
+const { createGooglePilotCalendar, createPearlSmileCalendarPilot, createPearlSmilePatientLinks } =
+  require("../pearlsmile-calendar-pilot");
 
 function fixture() {
   const claims = new Map();
@@ -77,6 +78,36 @@ test("availability can return a later Cebu date without mixing in earlier slots"
   assert.ok(slots.every(start => start.startsWith("2026-11-30")));
   assert.deepEqual((await pilot.availability("2026-11-28")).slots, []);
   await assert.rejects(pilot.availability(["2026-11-30"]), { status: 400 });
+});
+
+test("a patient link expires and cannot be forged or accepted for a different location", () => {
+  let time = Date.parse("2026-11-26T01:00:00Z");
+  const options = { secret: "fixture patient signing key with 32 bytes", now: () => time,
+    target: { accountId: "test-account", locationId: "test-location" } };
+  const links = createPearlSmilePatientLinks(options);
+  const token = links.create();
+  assert.match(links.read(token), /^[a-f0-9-]{36}$/);
+  assert.equal(links.read((token.startsWith("a") ? "b" : "a") + token.slice(1)), null);
+  assert.equal(createPearlSmilePatientLinks({ ...options,
+    target: { ...options.target, locationId: "other-location" } }).read(token), null);
+  assert.equal(createPearlSmilePatientLinks({ ...options, secret: undefined }).read(token), null);
+  time += 60 * 60_000;
+  assert.equal(links.read(token), null);
+});
+
+test("one patient link can reserve only one slot and retry the confirmed reservation", async () => {
+  const { pilot, outcomes, writes } = fixture();
+  const links = createPearlSmilePatientLinks({ secret: "fixture patient signing key with 32 bytes",
+    target: { accountId: "test-account", locationId: "test-location" } });
+  const requestId = links.read(links.create());
+  const { slots } = await pilot.availability();
+  const attempts = await Promise.allSettled(slots.slice(0, 2).map(start => pilot.book(start, requestId)));
+  const winner = attempts.find(attempt => attempt.status === "fulfilled").value;
+  assert.equal(attempts.filter(attempt => attempt.status === "fulfilled").length, 1);
+  assert.equal(attempts.find(attempt => attempt.status === "rejected").reason.status, 409);
+  assert.deepEqual(await pilot.book(winner.start, requestId), winner);
+  assert.equal(writes(), 1);
+  assert.equal(outcomes.size, 1);
 });
 
 test("retries recover a calendar booking if Daily Action was briefly unavailable", async () => {
