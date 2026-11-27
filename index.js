@@ -12,6 +12,7 @@ const { sendSupportTestReply } = require("./support-email-test-reply");
 const { createSupportEmailPreview } = require("./support-email-inbound");
 const { createGooglePilotCalendar, createPearlSmileCalendarPilot, createPearlSmilePatientLinks } =
   require("./pearlsmile-calendar-pilot");
+const { createPearlSmileVoiceSession } = require("./pearlsmile-voice-session");
 const {
   outcomeKey, hasOpsAccess, parseAlertEmails, createOutcomeLedger
 } = require("./outcome-ledger");
@@ -3544,7 +3545,7 @@ app.post("/pilots/pearlsmile/patient-voice", express.text({ type: "application/s
       pearlSmileVoiceStarts.set(requestId, attempt);
       const form = new FormData();
       form.append("sdp", req.body);
-      form.append("session", JSON.stringify({
+      form.append("session", JSON.stringify(req.query.flow === "conversation" ? createPearlSmileVoiceSession() : {
         type: "realtime", model: "gpt-realtime", output_modalities: ["audio"], tools: [],
         instructions: "You are Maria at PearlSmile Dental. Read the provided line clearly and verbatim. Never add a claim about a booking.",
         audio: {
