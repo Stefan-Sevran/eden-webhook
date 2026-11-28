@@ -10,7 +10,7 @@ const pilot = Object.freeze({
   pageUrl: "https://www.facebook.com/profile.php?id=61590069232706",
   facts: "This is a test clinic in Manila. Use fictional facial consultation requests for the pilot. Staff confirm prices, hours, and appointment availability."
 });
-const redirectUri = "https://clinicnet.live/clinic/";
+const productionRedirectUri = "https://clinicnet.live/clinic/";
 const statePrefix = "eden-messenger";
 const stateDuration = 10 * 60 * 1000;
 const testDuration = 30 * 60 * 1000;
@@ -48,7 +48,7 @@ function parseMessengerPilots(raw, reservedPageIds) {
 
 function createMessengerConnect({ appId, appSecret, configId, encryptionKey, ledger,
   clinicTenantApi, messenger, pilots = new Map([[pilot.locationId, pilot]]), guidedMessengerSetup = false,
-  configuredPilot,
+  configuredPilot, calendarTestLocationId, redirectUri = productionRedirectUri,
   fetchImpl = fetch, now = Date.now }) {
   const enabled = Boolean(/^\d{5,30}$/.test(appId || "") && appSecret &&
     /^\d{5,30}$/.test(configId || "") && /^[a-f0-9]{64}$/i.test(encryptionKey || "") &&
@@ -74,7 +74,9 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
       target.locationId !== configuredPilot?.locationId) : [];
     if ((!configured.length && !targets.length) || !await isAdmin(req, accountId)) return [];
     if (!guidedMessengerSetup || !targets.length) {
-      return [...configured, ...targets.map(({ locationId, clinicName, pageUrl }) => ({ locationId, clinicName, pageUrl }))];
+      return [...configured, ...targets.map(({ locationId, clinicName, pageUrl }) => ({
+        locationId, clinicName, pageUrl, ...(locationId === calendarTestLocationId && { calendarTest: true })
+      }))];
     }
     const filter = new URLSearchParams({ select: "id,messenger_facts", account_id: "eq." + accountId });
     const locations = await clinicTenantApi.request(req.clinicToken, "clinic_locations?" + filter);
