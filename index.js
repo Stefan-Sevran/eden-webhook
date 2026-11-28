@@ -148,21 +148,37 @@ try {
 }
 const configuredMessengerPageId = process.env.PEARLSMILE_TEST_MESSENGER_PAGE_ID;
 const configuredMessengerPage = clinicMessengerPages.get(configuredMessengerPageId);
-const configuredMessengerPilot = process.env.RENDER_SERVICE_NAME === "eden-webhook-staging" &&
+const stagingCalendarMessenger = process.env.RENDER_SERVICE_NAME === "eden-webhook-staging" &&
   pearlSmileCalendarPilot.enabled && clinicTenantApi.enabled && outcomeLedger.enabled &&
-  process.env.META_APP_ID && META_APP_SECRET && configuredMessengerPage &&
+  process.env.META_APP_ID && META_APP_SECRET;
+const stagingLoginConfigId = process.env.PEARLSMILE_TEST_MESSENGER_LOGIN_CONFIG_ID;
+const stagingOAuthTarget = stagingCalendarMessenger &&
+  process.env.META_APP_ID === "1662450442016330" && configuredMessengerPageId === "1142491848941366" &&
+  /^\d{5,30}$/.test(stagingLoginConfigId || "") &&
+  /^[a-f0-9]{64}$/i.test(process.env.CLINIC_MESSENGER_TOKEN_KEY || "") &&
+  isUuid(pearlSmileCalendarTarget.accountId) && isUuid(pearlSmileCalendarTarget.locationId)
+    ? { ...pearlSmileCalendarTarget, pageId: configuredMessengerPageId, clinicName: "Cebu Dent Clinic",
+      pageUrl: "https://www.facebook.com/profile.php?id=61589442650277",
+      facts: "PearlSmile staging pilot. Fictional initial consultations only." }
+    : undefined;
+const configuredMessengerPilot = !stagingOAuthTarget && stagingCalendarMessenger && configuredMessengerPage &&
   configuredMessengerPage.accountId === pearlSmileCalendarTarget.accountId &&
   configuredMessengerPage.locationId === pearlSmileCalendarTarget.locationId
     ? { ...configuredMessengerPage, pageId: configuredMessengerPageId } : undefined;
 const messengerConnect = createMessengerConnect({
   appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
-  configId: process.env.META_MESSENGER_LOGIN_CONFIG_ID,
+  configId: stagingOAuthTarget ? stagingLoginConfigId : process.env.META_MESSENGER_LOGIN_CONFIG_ID,
   encryptionKey: process.env.CLINIC_MESSENGER_TOKEN_KEY,
-  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots, guidedMessengerSetup,
+  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger,
+  pilots: stagingOAuthTarget ? new Map([[stagingOAuthTarget.locationId, stagingOAuthTarget]]) : messengerPilots,
+  guidedMessengerSetup: !stagingOAuthTarget && guidedMessengerSetup,
+  calendarTestLocationId: stagingOAuthTarget?.locationId,
+  redirectUri: stagingOAuthTarget ? "https://codex-ask-eden-preview.clinicnet-web.pages.dev/clinic/" : undefined,
   configuredPilot: configuredMessengerPilot
 });
 if (messengerConnect.enabled) {
-  for (const target of messengerPilots.values()) clinicMessenger.registerPage(target.pageId, target);
+  if (stagingOAuthTarget) clinicMessenger.registerPage(stagingOAuthTarget.pageId, stagingOAuthTarget);
+  else for (const target of messengerPilots.values()) clinicMessenger.registerPage(target.pageId, target);
 }
 
 async function recordClinicOutcome(event) {
