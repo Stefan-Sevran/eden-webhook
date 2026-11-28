@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createMessengerConnect, parseMessengerPilots, messengerConnectPilot: pilot } = require("../clinic-messenger-connect");
 
-function fixture(target = pilot, pilots, guidedMessengerSetup = false) {
+function fixture(target = pilot, pilots, guidedMessengerSetup = false, options = {}) {
   let clock = Date.parse("2026-11-07T07:00:00Z");
   let role = "admin";
   let stored;
@@ -11,7 +11,7 @@ function fixture(target = pilot, pilots, guidedMessengerSetup = false) {
   const pageToken = "meta_page_credential_for_testing";
   const app = createMessengerConnect({
     appId: "980837197825196", appSecret: "test-secret", configId: "1234567", encryptionKey: "ab".repeat(32),
-    now: () => clock, pilots, guidedMessengerSetup,
+    now: () => clock, pilots, guidedMessengerSetup, ...options,
     clinicTenantApi: { enabled: true, request: async (_, path) => path.startsWith("clinic_locations?")
       ? [{ id: target.locationId, messenger_facts: facts }] : [{ role }] },
     ledger: {
@@ -112,6 +112,18 @@ test("connects Glow with a server-side code exchange and stores a scoped encrypt
   const route = { id: "test-route", account_id: pilot.accountId, location_id: pilot.locationId };
   assert.equal(await app.pageToken(pilot.pageId, route), pageToken);
   assert.equal(await app.pageToken(pilot.pageId, { ...route, location_id: "other" }), null);
+});
+
+test("the calendar test Page uses browser authorization and returns to the preview workspace", async () => {
+  const redirectUri = "https://codex-ask-eden-preview.clinicnet-web.pages.dev/clinic/";
+  const { app, exchanges } = fixture(pilot, undefined, false, { redirectUri, calendarTestLocationId: pilot.locationId });
+  const setups = await app.setups({ ...req, query: { accountId: pilot.accountId } });
+  assert.equal(setups[0].calendarTest, true);
+  assert.equal(setups[0].preconfigured, undefined);
+  const { url, state } = await app.start(req);
+  assert.equal(new URL(url).searchParams.get("redirect_uri"), redirectUri);
+  await app.finish({ ...req, body: { ...req.body, state, code: "one-time-code" } });
+  assert.equal(exchanges[0].searchParams.get("redirect_uri"), redirectUri);
 });
 
 test("only pilot administrators can confirm facts and issue a Page-bound setup test", async () => {
