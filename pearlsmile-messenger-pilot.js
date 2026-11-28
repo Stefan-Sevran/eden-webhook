@@ -28,6 +28,7 @@ function createPearlSmileMessengerPilot({ pageId, target, calendar }) {
   }
 
   async function respond({ text, preference, previous, previousSent }) {
+    if (/^start a new test booking[.!\s]*$/i.test(text)) return alternatives({});
     const { pending, requestId, confirmed, offers = [], retry } = previous || {};
     if (confirmed) {
       return draft(`Your test consultation is confirmed for ${label(confirmed)}, Cebu time.`, { confirmed });
