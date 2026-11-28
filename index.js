@@ -146,11 +146,20 @@ try {
     messengerPilots.set(messengerConnectPilot.locationId, messengerConnectPilot);
   }
 }
+const configuredMessengerPageId = process.env.PEARLSMILE_TEST_MESSENGER_PAGE_ID;
+const configuredMessengerPage = clinicMessengerPages.get(configuredMessengerPageId);
+const configuredMessengerPilot = process.env.RENDER_SERVICE_NAME === "eden-webhook-staging" &&
+  pearlSmileCalendarPilot.enabled && clinicTenantApi.enabled && outcomeLedger.enabled &&
+  process.env.META_APP_ID && META_APP_SECRET && configuredMessengerPage &&
+  configuredMessengerPage.accountId === pearlSmileCalendarTarget.accountId &&
+  configuredMessengerPage.locationId === pearlSmileCalendarTarget.locationId
+    ? { ...configuredMessengerPage, pageId: configuredMessengerPageId } : undefined;
 const messengerConnect = createMessengerConnect({
   appId: process.env.META_APP_ID, appSecret: META_APP_SECRET,
   configId: process.env.META_MESSENGER_LOGIN_CONFIG_ID,
   encryptionKey: process.env.CLINIC_MESSENGER_TOKEN_KEY,
-  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots, guidedMessengerSetup
+  ledger: outcomeLedger, clinicTenantApi, messenger: clinicMessenger, pilots: messengerPilots, guidedMessengerSetup,
+  configuredPilot: configuredMessengerPilot
 });
 if (messengerConnect.enabled) {
   for (const target of messengerPilots.values()) clinicMessenger.registerPage(target.pageId, target);
@@ -3415,7 +3424,7 @@ app.get("/clinic/public-config", (_req, res) => {
   res.json({
     supabaseUrl: clinicTenantApi.enabled ? process.env.SUPABASE_URL : null,
     publishableKey: clinicTenantApi.enabled ? process.env.SUPABASE_PUBLISHABLE_KEY : null,
-    messengerSetupAvailable: messengerConnect.enabled && messengerPilots.size > 0,
+    messengerSetupAvailable: Boolean(configuredMessengerPilot || (messengerConnect.enabled && messengerPilots.size > 0)),
     commentPilotPublishAvailable: commentPilotConfig?.publish === true,
     messengerConnect: messengerConnect.enabled && messengerConnectPilot.pageId !== META_PAGE_ID ? {
       accountId: messengerConnectPilot.accountId, locationId: messengerConnectPilot.locationId

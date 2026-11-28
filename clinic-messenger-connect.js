@@ -48,6 +48,7 @@ function parseMessengerPilots(raw, reservedPageIds) {
 
 function createMessengerConnect({ appId, appSecret, configId, encryptionKey, ledger,
   clinicTenantApi, messenger, pilots = new Map([[pilot.locationId, pilot]]), guidedMessengerSetup = false,
+  configuredPilot,
   fetchImpl = fetch, now = Date.now }) {
   const enabled = Boolean(/^\d{5,30}$/.test(appId || "") && appSecret &&
     /^\d{5,30}$/.test(configId || "") && /^[a-f0-9]{64}$/i.test(encryptionKey || "") &&
@@ -65,15 +66,22 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
   async function setups(req) {
     const accountId = req.query.accountId;
     if (!isUuid(accountId)) throw connectionError(400, "Invalid clinic account");
-    const targets = [...pilots.values()].filter(target => target.accountId === accountId);
-    if (!enabled || !targets.length || !await isAdmin(req, accountId)) return [];
-    if (!guidedMessengerSetup) return targets.map(({ locationId, clinicName, pageUrl }) => ({ locationId, clinicName, pageUrl }));
+    const configured = configuredPilot?.accountId === accountId ? [{
+      locationId: configuredPilot.locationId, clinicName: configuredPilot.clinicName,
+      pageUrl: `https://www.facebook.com/${configuredPilot.pageId}`, preconfigured: true
+    }] : [];
+    const targets = enabled ? [...pilots.values()].filter(target => target.accountId === accountId &&
+      target.locationId !== configuredPilot?.locationId) : [];
+    if ((!configured.length && !targets.length) || !await isAdmin(req, accountId)) return [];
+    if (!guidedMessengerSetup || !targets.length) {
+      return [...configured, ...targets.map(({ locationId, clinicName, pageUrl }) => ({ locationId, clinicName, pageUrl }))];
+    }
     const filter = new URLSearchParams({ select: "id,messenger_facts", account_id: "eq." + accountId });
     const locations = await clinicTenantApi.request(req.clinicToken, "clinic_locations?" + filter);
-    return targets.map(({ locationId, pageId, clinicName, pageUrl }) => ({
+    return [...configured, ...targets.map(({ locationId, pageId, clinicName, pageUrl }) => ({
       locationId, clinicName, pageUrl: pageUrl || `https://www.facebook.com/${pageId}`,
       facts: locations.find(location => location.id === locationId)?.messenger_facts ?? null
-    }));
+    }))];
   }
 
   async function requirePilotAdmin(req) {
@@ -145,6 +153,20 @@ function createMessengerConnect({ appId, appSecret, configId, encryptionKey, led
   }
 
   async function start(req) {
+    if (configuredPilot && req.body?.locationId === configuredPilot.locationId) {
+      const { accountId, pageId } = configuredPilot;
+      if (req.body.accountId !== accountId || !await isAdmin(req, accountId)) {
+        throw connectionError(403, "Messenger connection requires a clinic admin");
+      }
+      if (!await messenger.verifyPage(pageId, configuredPilot).catch(error => {
+        throw connectionError(422, error.message);
+      })) {
+        throw connectionError(409, "Meta did not verify the configured Page and its messages subscription");
+      }
+      const connection = await ledger.provisionMessengerConnection(pageId, configuredPilot);
+      if (!connection) throw connectionError(409, "Messenger setup is unavailable for this location");
+      return { status: connection.status };
+    }
     const target = await requirePilotAdmin(req);
     const value = [statePrefix, now() + stateDuration, randomBytes(18).toString("base64url")].join(".");
     const state = value + "." + signature(value, req.clinicUserId, target.locationId);

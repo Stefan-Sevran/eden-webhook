@@ -57,6 +57,46 @@ const req = { clinicUserId: "test-admin", clinicToken: "session", body: {
   accountId: pilot.accountId, locationId: pilot.locationId
 } };
 
+test("a configured Page requires the matching clinic administrator and successful Meta verification", async () => {
+  const configuredPilot = { ...pilot, pageToken: "server-only-page-token" };
+  let role = "staff";
+  let verified = false;
+  let graphCalls = 0;
+  let provisionCalls = 0;
+  const app = createMessengerConnect({
+    configuredPilot,
+    clinicTenantApi: { enabled: true, request: async () => [{ role }] },
+    messenger: { async verifyPage(pageId, page) {
+      assert.equal(pageId, pilot.pageId);
+      assert.equal(page, configuredPilot);
+      graphCalls += 1;
+      return verified;
+    } },
+    ledger: { enabled: true, async provisionMessengerConnection(pageId, page) {
+      assert.equal(pageId, pilot.pageId);
+      assert.equal(page, configuredPilot);
+      provisionCalls += 1;
+      return { status: "verifying" };
+    } }
+  });
+  const setupRequest = { ...req, query: { accountId: pilot.accountId } };
+  assert.equal(app.enabled, false);
+  assert.deepEqual(await app.setups(setupRequest), []);
+  await assert.rejects(app.start(req), { status: 403 });
+  role = "owner";
+  await assert.rejects(app.start({ ...req, body: { ...req.body, accountId: pilot.locationId } }), { status: 403 });
+  assert.equal(graphCalls, 0);
+  assert.deepEqual(await app.setups(setupRequest), [{
+    locationId: pilot.locationId, clinicName: pilot.clinicName,
+    pageUrl: `https://www.facebook.com/${pilot.pageId}`, preconfigured: true
+  }]);
+  await assert.rejects(app.start(req), { status: 409 });
+  assert.equal(provisionCalls, 0);
+  verified = true;
+  assert.deepEqual(await app.start(req), { status: "verifying" });
+  assert.equal(provisionCalls, 1);
+});
+
 test("connects Glow with a server-side code exchange and stores a scoped encrypted token", async () => {
   const { app, exchanges, pageToken } = fixture();
   const { url, state } = await app.start(req);
